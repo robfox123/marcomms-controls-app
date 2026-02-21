@@ -2,6 +2,11 @@
 This is the "Quickstart React" example Monday app. 
 <br>It can be used as a board view or dashboard widget, connected to a board and render data from the board using settings.
 
+## Project Docs
+
+- Deployment workflow (GitHub -> Cloudflare Pages -> Monday): `DEPLOYMENT_WORKFLOW.md`
+- Version history and release notes: `RELEASE_NOTES.md`
+
 <br>This app demonstrates how to use: 
 - [settings](https://developer.monday.com/apps/docs/mondayget#requesting-context-and-settings-data) 
 - [context](https://developer.monday.com/apps/docs/mondayget#sample-context-objects-for-each-feature-type) 
