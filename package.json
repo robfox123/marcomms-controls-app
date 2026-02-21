@@ -14,7 +14,8 @@
     "server": "vite",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
-    "stop": "kill-port 8301 && kill-port 4049 && kill-port 4040"
+    "stop": "kill-port 8301 && kill-port 4049 && kill-port 4040",
+    "build": "vite build"
   },
   "dependencies": {
     "@mondaycom/apps-sdk": "^2.1.2",
@@ -25,7 +26,7 @@
     "react-dom": "^18.2.0",
     "sass": "^1.54.8",
     "vite": "^6.2.2",
-    "xlsx": "file:../../../Figma/API Monday Updating/Monday API/node_modules/xlsx"
+    "xlsx": "0.18.5"
   },
   "eslintConfig": {
     "extends": "react-app"
@@ -46,8 +47,7 @@
     "@mondaycom/apps-cli": "^4.9.2",
     "concurrently": "^5.3.0",
     "cross-port-killer": "^1.2.1",
-    "eslint-config-react-app": "^7.0.1",
-    "parse-gitignore": "^2.0.0"
+    "eslint-config-react-app": "^7.0.1"
   },
   "type": "module"
 }
