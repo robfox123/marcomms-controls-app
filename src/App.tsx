@@ -2447,6 +2447,20 @@ export default function App() {
     }
   }
 
+  async function runTrailerLinks() {
+    if (busy) return;
+    setBusy(true);
+    setProgress(null);
+    setStatus("Trailer links run started. Pending Monday API trailer logic wiring.");
+    try {
+      // Hook trailer-link processing here once the Monday API logic is provided.
+      await sleep(200);
+      setStatus("Trailer links action is ready, but the specific Monday API logic has not been added yet.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div style={{ maxWidth: 1100, padding: 16, fontFamily: "sans-serif" }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -2467,31 +2481,41 @@ export default function App() {
       )}
 
       {workflow === "home" && (
-        <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
-          <button
-            onClick={() => {
-              setWorkflow("align");
-              setAlignStep(1);
-            }}
-            style={{ textAlign: "left", padding: 12 }}
-          >
-            <strong>Align 'In Marcomms'</strong>
-            <div style={{ opacity: 0.7, marginTop: 6 }}>Reset and align Marcomms values against current selection.</div>
-          </button>
-          <button
-            onClick={() => {
-              setWorkflow("pg");
-              setPgStep(1);
-            }}
-            style={{ textAlign: "left", padding: 12 }}
-          >
-            <strong>Updates Items to latest Programme Grid</strong>
-            <div style={{ opacity: 0.7, marginTop: 6 }}>Load latest grid data, validate mappings, then deploy updates.</div>
-          </button>
-          <button onClick={() => setWorkflow("archive")} style={{ textAlign: "left", padding: 12 }}>
-            <strong>Archive old items</strong>
-            <div style={{ opacity: 0.7, marginTop: 6 }}>Identify and archive stale content items from previous cycles.</div>
-          </button>
+        <div>
+          <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+            <button
+              onClick={() => {
+                setWorkflow("align");
+                setAlignStep(1);
+              }}
+              style={{ textAlign: "left", padding: 12 }}
+            >
+              <strong>Align 'In Marcomms'</strong>
+              <div style={{ opacity: 0.7, marginTop: 6 }}>Reset and align Marcomms values against current selection.</div>
+            </button>
+            <button
+              onClick={() => {
+                setWorkflow("pg");
+                setPgStep(1);
+              }}
+              style={{ textAlign: "left", padding: 12 }}
+            >
+              <strong>Updates Items to latest Programme Grid</strong>
+              <div style={{ opacity: 0.7, marginTop: 6 }}>Load latest grid data, validate mappings, then deploy updates.</div>
+            </button>
+            <button onClick={() => setWorkflow("archive")} style={{ textAlign: "left", padding: 12 }}>
+              <strong>Archive old items</strong>
+              <div style={{ opacity: 0.7, marginTop: 6 }}>Identify and archive stale content items from previous cycles.</div>
+            </button>
+          </div>
+
+          <div style={{ marginTop: 14, padding: 12, border: "1px solid #ddd" }}>
+            <h3 style={{ marginTop: 0, marginBottom: 8 }}>Trailer links</h3>
+            <p style={{ marginTop: 0, opacity: 0.8 }}>Run the Trailer links Monday API operation.</p>
+            <button disabled={busy} onClick={runTrailerLinks}>
+              Run Trailer links
+            </button>
+          </div>
         </div>
       )}
 
