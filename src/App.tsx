@@ -15,6 +15,7 @@ const DEPLOY_CONCURRENCY = 6;
 const COL_CONTENT_TYPE = "status_1_mkn3yyv4";
 const COL_FOREIGN_TITLE = "text_mks31sjy";
 const COL_SEASON_YEAR_ALBUM = "text_mksd2s7y";
+const COL_TRAILER_LINK = "link_mks3yxj3";
 const COL_CYCLE = "text_mkxga9d";
 const COL_CYCLE_EXPIRED = "text_mm0pw9kx";
 const COL_CYCLE_EXPIRED_FALLBACK = "lookup_mm0p6m5c";
@@ -24,6 +25,8 @@ const COL_FLAG_EX3 = "boolean_mkrramxw";
 const COL_FLAG_EX2 = "boolean_mkrra4nz";
 const COL_FLAG_L3 = "boolean_mkrr1hwr";
 const COL_FLAG_THALES = "boolean_mkrrpfvg";
+const TMDB_API_KEY = "15565da9094b23c59adcd5f62435786d";
+const YOUTUBE_API_KEY = "AIzaSyCRKi5aWBsGMujtb0u-HjtuXHrzHC7_txA";
 
 type Scope = "selected" | "group" | "board";
 type Workflow = "home" | "align" | "pg" | "archive";
@@ -236,6 +239,14 @@ const CATEGORY_RANGE_MAP: Record<RequiredPgSheet, [string, string]> = {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function qs(base: string, params: Record<string, string | number | undefined>) {
+  const query = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== "")
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join("&");
+  return query ? `${base}?${query}` : base;
 }
 
 function formatApiError(error: any, fallback = "Unknown API error"): string {
@@ -2448,14 +2459,182 @@ export default function App() {
   }
 
   async function runTrailerLinks() {
+    if (!boardId) {
+      setStatus("Board context not ready yet.");
+      return;
+    }
     if (busy) return;
     setBusy(true);
-    setProgress(null);
-    setStatus("Trailer links run started. Pending Monday API trailer logic wiring.");
+    setFailedUpdates([]);
+    setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
+    setStatus("Trailer links run started...");
+
+    const NA_URL = "https://www.imdb.com";
+    const NA_TEXT = "NOT AVAILABLE";
+
+    const getExistingLinkUrl = (item: MondayBoardItem): string => {
+      const col = getItemColumn(item, COL_TRAILER_LINK);
+      const raw = col?.value;
+      if (!raw) return "";
+      try {
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        return String((parsed as any)?.url ?? "").trim();
+      } catch {
+        return "";
+      }
+    };
+
+    const getYear = (item: MondayBoardItem): number | undefined => {
+      const yearText = getItemColumnText(item, COL_SEASON_YEAR_ALBUM);
+      const match = yearText.match(/\b(19|20)\d{2}\b/);
+      if (!match) return undefined;
+      return Number(match[0]);
+    };
+
+    const tmdbSearch = async (title: string, mediaType: "movie" | "tv", year?: number) => {
+      const url = qs(`https://api.themoviedb.org/3/search/${mediaType}`, {
+        api_key: TMDB_API_KEY,
+        query: title,
+        year: mediaType === "movie" ? year : undefined,
+      });
+      const res = await fetch(url);
+      if (!res.ok) return [];
+      const json = await res.json();
+      return Array.isArray(json?.results) ? json.results : [];
+    };
+
+    const tmdbFindOfficialTrailer = async (id: number, mediaType: "movie" | "tv"): Promise<string | null> => {
+      const url = qs(`https://api.themoviedb.org/3/${mediaType}/${id}/videos`, { api_key: TMDB_API_KEY });
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const json = await res.json();
+      const videos = Array.isArray(json?.results) ? json.results : [];
+      for (const video of videos) {
+        const site = String(video?.site ?? "");
+        const type = String(video?.type ?? "");
+        const key = String(video?.key ?? "");
+        const name = String(video?.name ?? "").toLowerCase();
+        if (site === "YouTube" && type === "Trailer" && key && name.includes("official")) {
+          return `https://www.youtube.com/watch?v=${key}`;
+        }
+      }
+      for (const video of videos) {
+        const site = String(video?.site ?? "");
+        const type = String(video?.type ?? "");
+        const key = String(video?.key ?? "");
+        if (site === "YouTube" && type === "Trailer" && key) {
+          return `https://www.youtube.com/watch?v=${key}`;
+        }
+      }
+      return null;
+    };
+
+    const youtubeFallback = async (title: string): Promise<string | null> => {
+      const searchUrl = qs("https://www.googleapis.com/youtube/v3/search", {
+        key: YOUTUBE_API_KEY,
+        q: `${title} trailer`,
+        part: "snippet",
+        maxResults: 1,
+        type: "video",
+      });
+      const res = await fetch(searchUrl);
+      if (!res.ok) return null;
+      const json = await res.json();
+      const id = json?.items?.[0]?.id?.videoId;
+      if (!id) return null;
+      return `https://www.youtube.com/watch?v=${id}`;
+    };
+
+    const setLinkColumn = async (itemId: string, url: string, text: string) => {
+      const mutation = `
+        mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+          change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
+            id
+          }
+        }
+      `;
+      await monday.api(mutation, {
+        variables: {
+          boardId,
+          itemId,
+          columnId: COL_TRAILER_LINK,
+          value: JSON.stringify({ url, text }),
+        },
+      });
+    };
+
     try {
-      // Hook trailer-link processing here once the Monday API logic is provided.
-      await sleep(200);
-      setStatus("Trailer links action is ready, but the specific Monday API logic has not been added yet.");
+      const items = await fetchBoardItemsForDeploy(boardId);
+      if (!items.length) {
+        setStatus("No items found on this board.");
+        setProgress(null);
+        return;
+      }
+
+      let done = 0;
+      let updated = 0;
+      let skipped = 0;
+      let failed = 0;
+      let noMatch = 0;
+
+      setProgress({ done: 0, total: items.length, ok: 0, failed: 0 });
+      setStatus(`Processing trailer links for ${items.length} item(s)...`);
+
+      for (const item of items) {
+        const itemId = String(item.id);
+        try {
+          const existingUrl = getExistingLinkUrl(item);
+          const existingText = getItemColumnText(item, COL_TRAILER_LINK);
+          if (existingUrl || existingText) {
+            skipped += 1;
+            continue;
+          }
+
+          const foreignTitle = getItemColumnText(item, COL_FOREIGN_TITLE);
+          const title = (foreignTitle || item.name || "").trim();
+          if (!title) {
+            failed += 1;
+            continue;
+          }
+
+          const year = getYear(item);
+          const [movies, tv] = await Promise.all([tmdbSearch(title, "movie", year), tmdbSearch(title, "tv")]);
+          const scored = [...movies.map((r: any) => ({ ...r, _media_type: "movie" as const })), ...tv.map((r: any) => ({ ...r, _media_type: "tv" as const }))]
+            .map((r: any) => {
+              const candidate = String(r?.title ?? r?.name ?? "");
+              return { ...r, _score: movieTokenSetScore(title, candidate) };
+            })
+            .sort((a: any, b: any) => Number(b?._score ?? 0) - Number(a?._score ?? 0));
+
+          let trailerUrl: string | null = null;
+          if (scored.length) {
+            const best = scored[0];
+            trailerUrl = await tmdbFindOfficialTrailer(Number(best.id), best._media_type);
+          }
+          if (!trailerUrl) {
+            trailerUrl = await youtubeFallback(title);
+          }
+
+          if (!trailerUrl) {
+            await setLinkColumn(itemId, NA_URL, NA_TEXT);
+            noMatch += 1;
+          } else {
+            await setLinkColumn(itemId, trailerUrl, "Trailer");
+            updated += 1;
+          }
+        } catch {
+          failed += 1;
+        } finally {
+          done += 1;
+          setProgress({ done, total: items.length, ok: updated, failed });
+          setStatus(
+            `Trailer links ${done}/${items.length} • Updated: ${updated} • Skipped: ${skipped} • No match: ${noMatch} • Failed: ${failed}`
+          );
+          await sleep(120);
+        }
+      }
+
+      setStatus(`Trailer links complete. Updated: ${updated}, Skipped: ${skipped}, No match: ${noMatch}, Failed: ${failed}.`);
     } finally {
       setBusy(false);
     }
