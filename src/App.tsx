@@ -2674,7 +2674,7 @@ export default function App() {
       } else if (trailerScope === "group") {
         if (!trailerGroupId) {
           setStatus("Choose a trailer group first.");
-          setProgress(null);
+          setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
           log("Stopped: group scope chosen with no group ID.");
           return;
         }
@@ -2687,7 +2687,7 @@ export default function App() {
       if (scopedIds) {
         if (!scopedIds.length) {
           setStatus("No items found for selected trailer scope.");
-          setProgress(null);
+          setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
           log("No scoped IDs found.");
           return;
         }
@@ -2706,7 +2706,7 @@ export default function App() {
 
       if (!scopedItems.length) {
         setStatus("No items found for selected trailer scope.");
-        setProgress(null);
+        setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
         log("No scoped items found.");
         return;
       }
@@ -2719,7 +2719,7 @@ export default function App() {
 
       if (!items.length) {
         setStatus("No trailer updates needed. All scoped items already have trailer links.");
-        setProgress(null);
+        setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
         log("All scoped items already had trailer links.");
         return;
       }
