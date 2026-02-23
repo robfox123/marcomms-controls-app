@@ -14,6 +14,8 @@ const UPDATE_RETRY_BACKOFF_MS = 250;
 const DEPLOY_CONCURRENCY = 6;
 const FETCH_CURSOR_MAX_PAGES = 80;
 const EXTERNAL_FETCH_TIMEOUT_MS = 12000;
+const MONDAY_API_TIMEOUT_MS = 25000;
+const TRAILER_RUN_TIMEOUT_MS = 300000;
 const COL_CONTENT_TYPE = "status_1_mkn3yyv4";
 const COL_FOREIGN_TITLE = "text_mks31sjy";
 const COL_SEASON_YEAR_ALBUM = "text_mksd2s7y";
@@ -241,6 +243,18 @@ const CATEGORY_RANGE_MAP: Record<RequiredPgSheet, [string, string]> = {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function qs(base: string, params: Record<string, string | number | undefined>) {
@@ -809,7 +823,11 @@ async function fetchBoardItemsForDeploy(boardId: number): Promise<MondayBoardIte
     if (pages > FETCH_CURSOR_MAX_PAGES) break;
     if (cursor && seenCursors.has(cursor)) break;
     if (cursor) seenCursors.add(cursor);
-    const res = await monday.api(query, { variables: { boardId, cursor } });
+    const res = await withTimeout(
+      monday.api(query, { variables: { boardId, cursor } }),
+      MONDAY_API_TIMEOUT_MS,
+      "Timed out fetching board items from Monday API."
+    );
     const page = res?.data?.boards?.[0]?.items_page;
     const items = (page?.items ?? []) as MondayBoardItem[];
     allItems.push(...items);
@@ -855,7 +873,11 @@ async function fetchItemIds(boardId: number, scope: Scope, groupId?: string): Pr
   let cursor: string | null = null;
 
   while (true) {
-    const res = await monday.api(query, { variables: { boardId, cursor } });
+    const res = await withTimeout(
+      monday.api(query, { variables: { boardId, cursor } }),
+      MONDAY_API_TIMEOUT_MS,
+      "Timed out fetching scoped item IDs from Monday API."
+    );
     const page = res?.data?.boards?.[0]?.items_page;
     const items = page?.items ?? [];
 
@@ -2593,6 +2615,8 @@ export default function App() {
     };
 
     try {
+      await withTimeout(
+        (async () => {
       const allItems = await fetchBoardItemsForDeploy(boardId);
       if (!allItems.length) {
         setStatus("No items found on this board.");
@@ -2696,6 +2720,12 @@ export default function App() {
       }
 
       setStatus(`Trailer links complete. Updated: ${updated}, Skipped: ${skipped}, No match: ${noMatch}, Failed: ${failed}.`);
+        })(),
+        TRAILER_RUN_TIMEOUT_MS,
+        "Trailer links timed out. Please narrow scope (Selected/Group) and try again."
+      );
+    } catch (error: any) {
+      setStatus(`Trailer links failed: ${error?.message ?? String(error)}`);
     } finally {
       setBusy(false);
     }
@@ -2782,6 +2812,29 @@ export default function App() {
             <button disabled={busy} onClick={runTrailerLinks}>
               Run Trailer links
             </button>
+            <div style={{ marginTop: 10, fontSize: 13 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <span>Status: {busy && status.toLowerCase().includes("trailer links") ? "Working" : "Idle"}</span>
+                {busy && status.toLowerCase().includes("trailer links") && (
+                  <span
+                    style={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: "50%",
+                      border: "2px solid #cbd5e1",
+                      borderTopColor: "#475569",
+                      display: "inline-block",
+                      animation: "spin 0.8s linear infinite",
+                    }}
+                  />
+                )}
+              </div>
+              <div style={{ marginTop: 4 }}>{status}</div>
+              <progress value={progress.done} max={Math.max(progress.total, 1)} style={{ width: 360, height: 14, marginTop: 6 }} />
+              <div style={{ marginTop: 4, opacity: 0.8 }}>
+                Progress: {progress.done}/{progress.total} | Success: {progress.ok} | Failed: {progress.failed}
+              </div>
+            </div>
           </div>
         </div>
       )}
