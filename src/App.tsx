@@ -12,6 +12,8 @@ const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
 const UPDATE_RETRY_BACKOFF_MS = 250;
 const DEPLOY_CONCURRENCY = 6;
+const FETCH_CURSOR_MAX_PAGES = 80;
+const EXTERNAL_FETCH_TIMEOUT_MS = 12000;
 const COL_CONTENT_TYPE = "status_1_mkn3yyv4";
 const COL_FOREIGN_TITLE = "text_mks31sjy";
 const COL_SEASON_YEAR_ALBUM = "text_mksd2s7y";
@@ -800,7 +802,13 @@ async function fetchBoardItemsForDeploy(boardId: number): Promise<MondayBoardIte
 
   const allItems: MondayBoardItem[] = [];
   let cursor: string | null = null;
+  const seenCursors = new Set<string>();
+  let pages = 0;
   while (true) {
+    pages += 1;
+    if (pages > FETCH_CURSOR_MAX_PAGES) break;
+    if (cursor && seenCursors.has(cursor)) break;
+    if (cursor) seenCursors.add(cursor);
     const res = await monday.api(query, { variables: { boardId, cursor } });
     const page = res?.data?.boards?.[0]?.items_page;
     const items = (page?.items ?? []) as MondayBoardItem[];
@@ -810,6 +818,20 @@ async function fetchBoardItemsForDeploy(boardId: number): Promise<MondayBoardIte
     await sleep(50);
   }
   return allItems;
+}
+
+async function fetchJsonWithTimeout(url: string, timeoutMs = EXTERNAL_FETCH_TIMEOUT_MS): Promise<any | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function fetchItemIds(boardId: number, scope: Scope, groupId?: string): Promise<number[]> {
@@ -2497,17 +2519,15 @@ export default function App() {
         query: title,
         year: mediaType === "movie" ? year : undefined,
       });
-      const res = await fetch(url);
-      if (!res.ok) return [];
-      const json = await res.json();
+      const json = await fetchJsonWithTimeout(url);
+      if (!json) return [];
       return Array.isArray(json?.results) ? json.results : [];
     };
 
     const tmdbFindOfficialTrailer = async (id: number, mediaType: "movie" | "tv"): Promise<string | null> => {
       const url = qs(`https://api.themoviedb.org/3/${mediaType}/${id}/videos`, { api_key: TMDB_API_KEY });
-      const res = await fetch(url);
-      if (!res.ok) return null;
-      const json = await res.json();
+      const json = await fetchJsonWithTimeout(url);
+      if (!json) return null;
       const videos = Array.isArray(json?.results) ? json.results : [];
       for (const video of videos) {
         const site = String(video?.site ?? "");
@@ -2537,9 +2557,8 @@ export default function App() {
         maxResults: 1,
         type: "video",
       });
-      const res = await fetch(searchUrl);
-      if (!res.ok) return null;
-      const json = await res.json();
+      const json = await fetchJsonWithTimeout(searchUrl);
+      if (!json) return null;
       const id = json?.items?.[0]?.id?.videoId;
       if (!id) return null;
       return `https://www.youtube.com/watch?v=${id}`;
