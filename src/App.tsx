@@ -33,6 +33,7 @@ const TMDB_API_KEY = "15565da9094b23c59adcd5f62435786d";
 const YOUTUBE_API_KEY = "AIzaSyCRKi5aWBsGMujtb0u-HjtuXHrzHC7_txA";
 
 type Scope = "selected" | "group" | "board";
+type TrailerMode = "auto_mark_na" | "auto_only";
 type Workflow = "home" | "align" | "pg" | "archive";
 type Group = { id: string; title: string };
 type Progress = { done: number; total: number; ok: number; failed: number };
@@ -1131,6 +1132,8 @@ export default function App() {
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
   const [scope, setScope] = useState<Scope>("selected");
   const [trailerScope, setTrailerScope] = useState<Scope>("selected");
+  const [trailerMode, setTrailerMode] = useState<TrailerMode>("auto_mark_na");
+  const [trailerLogs, setTrailerLogs] = useState<string[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupId, setGroupId] = useState<string>("");
   const [trailerGroupId, setTrailerGroupId] = useState<string>("");
@@ -2520,8 +2523,14 @@ export default function App() {
     if (busy) return;
     setBusy(true);
     setFailedUpdates([]);
+    setTrailerLogs([]);
     setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
     setStatus("Trailer links run started...");
+    const log = (line: string) => {
+      const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
+      setTrailerLogs((prev) => [...prev.slice(-299), `[${stamp}] ${line}`]);
+    };
+    log(`Run started. Scope=${trailerScope}, mode=${trailerMode}`);
 
     const NA_URL = "https://www.imdb.com";
     const NA_TEXT = "NOT AVAILABLE";
@@ -2617,10 +2626,13 @@ export default function App() {
     try {
       await withTimeout(
         (async () => {
+      log("Fetching board items from Monday...");
       const allItems = await fetchBoardItemsForDeploy(boardId);
+      log(`Fetched ${allItems.length} board item(s).`);
       if (!allItems.length) {
         setStatus("No items found on this board.");
         setProgress(null);
+        log("No items returned for board.");
         return;
       }
 
@@ -2628,19 +2640,24 @@ export default function App() {
       if (trailerScope === "selected") {
         const selectedIds = new Set(selectedItemIds.map((id) => String(id)));
         scopedItems = allItems.filter((item) => selectedIds.has(String(item.id)));
+        log(`Scoped by selected items: ${scopedItems.length}.`);
       } else if (trailerScope === "group") {
         if (!trailerGroupId) {
           setStatus("Choose a trailer group first.");
           setProgress(null);
+          log("Stopped: group scope chosen with no group ID.");
           return;
         }
+        log(`Resolving group item IDs for group ${trailerGroupId}...`);
         const ids = new Set((await fetchItemIds(boardId, "group", trailerGroupId)).map((id) => String(id)));
         scopedItems = allItems.filter((item) => ids.has(String(item.id)));
+        log(`Scoped by group: ${scopedItems.length}.`);
       }
 
       if (!scopedItems.length) {
         setStatus("No items found for selected trailer scope.");
         setProgress(null);
+        log("No scoped items found.");
         return;
       }
 
@@ -2653,6 +2670,7 @@ export default function App() {
       if (!items.length) {
         setStatus("No trailer updates needed. All scoped items already have trailer links.");
         setProgress(null);
+        log("All scoped items already had trailer links.");
         return;
       }
 
@@ -2664,6 +2682,7 @@ export default function App() {
 
       setProgress({ done: 0, total: items.length, ok: 0, failed: 0 });
       setStatus(`Processing trailer links for ${items.length} item(s) in ${trailerScopeHint.toLowerCase()}...`);
+      log(`Processing ${items.length} missing-link item(s).`);
 
       for (const item of items) {
         const itemId = String(item.id);
@@ -2679,6 +2698,7 @@ export default function App() {
           const title = (foreignTitle || item.name || "").trim();
           if (!title) {
             failed += 1;
+            log(`Item ${itemId}: failed (no title).`);
             continue;
           }
 
@@ -2701,14 +2721,22 @@ export default function App() {
           }
 
           if (!trailerUrl) {
-            await setLinkColumn(itemId, NA_URL, NA_TEXT);
-            noMatch += 1;
+            if (trailerMode === "auto_mark_na") {
+              await setLinkColumn(itemId, NA_URL, NA_TEXT);
+              noMatch += 1;
+              log(`Item ${itemId}: no match -> marked NOT AVAILABLE.`);
+            } else {
+              skipped += 1;
+              log(`Item ${itemId}: no match -> skipped (auto-only mode).`);
+            }
           } else {
             await setLinkColumn(itemId, trailerUrl, "Trailer");
             updated += 1;
+            log(`Item ${itemId}: trailer set (${trailerUrl}).`);
           }
-        } catch {
+        } catch (error: any) {
           failed += 1;
+          log(`Item ${itemId}: error (${error?.message ?? "unknown"}).`);
         } finally {
           done += 1;
           setProgress({ done, total: items.length, ok: updated, failed });
@@ -2720,12 +2748,14 @@ export default function App() {
       }
 
       setStatus(`Trailer links complete. Updated: ${updated}, Skipped: ${skipped}, No match: ${noMatch}, Failed: ${failed}.`);
+      log(`Run complete. Updated=${updated}, Skipped=${skipped}, NoMatch=${noMatch}, Failed=${failed}.`);
         })(),
         TRAILER_RUN_TIMEOUT_MS,
         "Trailer links timed out. Please narrow scope (Selected/Group) and try again."
       );
     } catch (error: any) {
       setStatus(`Trailer links failed: ${error?.message ?? String(error)}`);
+      log(`Run failed: ${error?.message ?? String(error)}`);
     } finally {
       setBusy(false);
     }
@@ -2784,6 +2814,13 @@ export default function App() {
             <p style={{ marginTop: 0, opacity: 0.8 }}>Run the Trailer links Monday API operation.</p>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
               <label>
+                Mode{" "}
+                <select disabled={busy} value={trailerMode} onChange={(e) => setTrailerMode(e.target.value as TrailerMode)}>
+                  <option value="auto_mark_na">Automatic</option>
+                  <option value="auto_only">Automatic (no NOT AVAILABLE writes)</option>
+                </select>
+              </label>
+              <label>
                 Scope{" "}
                 <select disabled={busy} value={trailerScope} onChange={(e) => setTrailerScope(e.target.value as Scope)}>
                   <option value="selected">Selected</option>
@@ -2833,6 +2870,32 @@ export default function App() {
               <progress value={progress.done} max={Math.max(progress.total, 1)} style={{ width: 360, height: 14, marginTop: 6 }} />
               <div style={{ marginTop: 4, opacity: 0.8 }}>
                 Progress: {progress.done}/{progress.total} | Success: {progress.ok} | Failed: {progress.failed}
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                  <strong>Output</strong>
+                  <button
+                    disabled={busy || trailerLogs.length === 0}
+                    onClick={() => setTrailerLogs([])}
+                    style={{ fontSize: 12, padding: "2px 6px" }}
+                  >
+                    Clear
+                  </button>
+                </div>
+                <div
+                  style={{
+                    border: "1px solid #ddd",
+                    background: "#fafafa",
+                    padding: 8,
+                    maxHeight: 180,
+                    overflow: "auto",
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                    fontSize: 12,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {trailerLogs.length ? trailerLogs.join("\n") : "No output yet."}
+                </div>
               </div>
             </div>
           </div>
