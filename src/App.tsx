@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2";
+const APP_VERSION = "1.2.1";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -843,16 +843,14 @@ async function fetchBoardItemsForDeploy(boardId: number, onPage?: (loaded: numbe
 async function fetchBoardItemsByIds(boardId: number, itemIds: string[], onBatch?: (done: number, total: number) => void): Promise<MondayBoardItem[]> {
   if (!itemIds.length) return [];
   const query = `
-    query ($boardId: [ID!], $itemIds: [ID!]) {
-      boards(ids: $boardId) {
-        items(ids: $itemIds) {
+    query ($itemIds: [ID!]) {
+      items(ids: $itemIds) {
+        id
+        name
+        column_values {
           id
-          name
-          column_values {
-            id
-            text
-            value
-          }
+          text
+          value
         }
       }
     }
@@ -864,18 +862,17 @@ async function fetchBoardItemsByIds(boardId: number, itemIds: string[], onBatch?
 
   for (let i = 0; i < uniqueIds.length; i += BATCH) {
     const batch = uniqueIds.slice(i, i + BATCH);
-    const res = await withTimeout(
-      monday.api(query, { variables: { boardId, itemIds: batch } }),
-      MONDAY_API_TIMEOUT_MS,
-      "Timed out fetching item details from Monday API."
-    );
-    const items = (res?.data?.boards?.[0]?.items ?? []) as MondayBoardItem[];
+    const res = await withTimeout(monday.api(query, { variables: { itemIds: batch } }), MONDAY_API_TIMEOUT_MS, "Timed out fetching item details from Monday API.");
+    const items = (res?.data?.items ?? []) as MondayBoardItem[];
     out.push(...items);
     onBatch?.(Math.min(i + batch.length, uniqueIds.length), uniqueIds.length);
     await sleep(40);
   }
 
-  return out;
+  if (out.length) return out;
+  const all = await fetchBoardItemsForDeploy(boardId, (loaded) => onBatch?.(Math.min(loaded, uniqueIds.length), uniqueIds.length));
+  const keep = new Set(uniqueIds);
+  return all.filter((item) => keep.has(String(item.id)));
 }
 
 async function fetchJsonWithTimeout(url: string, timeoutMs = EXTERNAL_FETCH_TIMEOUT_MS): Promise<any | null> {
