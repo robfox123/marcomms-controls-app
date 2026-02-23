@@ -1108,8 +1108,10 @@ export default function App() {
   const [boardId, setBoardId] = useState<number | null>(null);
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
   const [scope, setScope] = useState<Scope>("selected");
+  const [trailerScope, setTrailerScope] = useState<Scope>("selected");
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupId, setGroupId] = useState<string>("");
+  const [trailerGroupId, setTrailerGroupId] = useState<string>("");
   const [workflow, setWorkflow] = useState<Workflow>("home");
   const [alignStep, setAlignStep] = useState<1 | 2>(1);
   const [pgStep, setPgStep] = useState<1 | 2 | 3>(1);
@@ -1195,6 +1197,9 @@ export default function App() {
         if (nextGroups.length && !groupId) {
           setGroupId(nextGroups[0].id);
         }
+        if (nextGroups.length && !trailerGroupId) {
+          setTrailerGroupId(nextGroups[0].id);
+        }
       } catch (error: any) {
         if (!mounted) return;
         setStatus(`Failed to fetch groups: ${error?.message ?? String(error)}`);
@@ -1204,7 +1209,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [boardId, groupId]);
+  }, [boardId, groupId, trailerGroupId]);
 
   useEffect(() => {
     let mounted = true;
@@ -1246,6 +1251,11 @@ export default function App() {
     if (scope === "group") return `Group: ${groupId || "None selected"}`;
     return "Entire board";
   }, [scope, selectedItemIds.length, groupId]);
+  const trailerScopeHint = useMemo(() => {
+    if (trailerScope === "selected") return `Selected items: ${selectedItemIds.length}`;
+    if (trailerScope === "group") return `Group: ${trailerGroupId || "None selected"}`;
+    return "Entire board";
+  }, [trailerScope, selectedItemIds.length, trailerGroupId]);
   const selectedTitleLabels = useMemo(() => getTitleFieldLabels(pgOverrideSheet), [pgOverrideSheet]);
 
   const selectedSheetOverride = pgOverrides[pgOverrideSheet];
@@ -2583,9 +2593,41 @@ export default function App() {
     };
 
     try {
-      const items = await fetchBoardItemsForDeploy(boardId);
-      if (!items.length) {
+      const allItems = await fetchBoardItemsForDeploy(boardId);
+      if (!allItems.length) {
         setStatus("No items found on this board.");
+        setProgress(null);
+        return;
+      }
+
+      let scopedItems = allItems;
+      if (trailerScope === "selected") {
+        const selectedIds = new Set(selectedItemIds.map((id) => String(id)));
+        scopedItems = allItems.filter((item) => selectedIds.has(String(item.id)));
+      } else if (trailerScope === "group") {
+        if (!trailerGroupId) {
+          setStatus("Choose a trailer group first.");
+          setProgress(null);
+          return;
+        }
+        const ids = new Set((await fetchItemIds(boardId, "group", trailerGroupId)).map((id) => String(id)));
+        scopedItems = allItems.filter((item) => ids.has(String(item.id)));
+      }
+
+      if (!scopedItems.length) {
+        setStatus("No items found for selected trailer scope.");
+        setProgress(null);
+        return;
+      }
+
+      const items = scopedItems.filter((item) => {
+        const existingUrl = getExistingLinkUrl(item);
+        const existingText = getItemColumnText(item, COL_TRAILER_LINK);
+        return !existingUrl && !existingText;
+      });
+
+      if (!items.length) {
+        setStatus("No trailer updates needed. All scoped items already have trailer links.");
         setProgress(null);
         return;
       }
@@ -2597,7 +2639,7 @@ export default function App() {
       let noMatch = 0;
 
       setProgress({ done: 0, total: items.length, ok: 0, failed: 0 });
-      setStatus(`Processing trailer links for ${items.length} item(s)...`);
+      setStatus(`Processing trailer links for ${items.length} item(s) in ${trailerScopeHint.toLowerCase()}...`);
 
       for (const item of items) {
         const itemId = String(item.id);
@@ -2710,6 +2752,33 @@ export default function App() {
           <div style={{ marginTop: 14, padding: 12, border: "1px solid #ddd" }}>
             <h3 style={{ marginTop: 0, marginBottom: 8 }}>Trailer links</h3>
             <p style={{ marginTop: 0, opacity: 0.8 }}>Run the Trailer links Monday API operation.</p>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+              <label>
+                Scope{" "}
+                <select disabled={busy} value={trailerScope} onChange={(e) => setTrailerScope(e.target.value as Scope)}>
+                  <option value="selected">Selected</option>
+                  <option value="group">Group</option>
+                  <option value="board">Board</option>
+                </select>
+              </label>
+              {trailerScope === "group" && (
+                <label>
+                  Group{" "}
+                  <select disabled={busy} value={trailerGroupId} onChange={(e) => setTrailerGroupId(e.target.value)}>
+                    {groups.length === 0 ? (
+                      <option value="">No groups</option>
+                    ) : (
+                      groups.map((g) => (
+                        <option key={g.id} value={g.id}>
+                          {g.title}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+              )}
+              <span style={{ opacity: 0.7 }}>{trailerScopeHint}</span>
+            </div>
             <button disabled={busy} onClick={runTrailerLinks}>
               Run Trailer links
             </button>
