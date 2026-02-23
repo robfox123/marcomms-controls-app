@@ -795,7 +795,7 @@ function isInMarcommsValue(text?: string | null, value?: unknown): boolean {
   }
 }
 
-async function fetchBoardItemsForDeploy(boardId: number): Promise<MondayBoardItem[]> {
+async function fetchBoardItemsForDeploy(boardId: number, onPage?: (loaded: number) => void): Promise<MondayBoardItem[]> {
   const query = `
     query ($boardId: [ID!], $cursor: String) {
       boards(ids: $boardId) {
@@ -832,11 +832,50 @@ async function fetchBoardItemsForDeploy(boardId: number): Promise<MondayBoardIte
     const page = res?.data?.boards?.[0]?.items_page;
     const items = (page?.items ?? []) as MondayBoardItem[];
     allItems.push(...items);
+    onPage?.(allItems.length);
     cursor = page?.cursor ?? null;
     if (!cursor) break;
     await sleep(50);
   }
   return allItems;
+}
+
+async function fetchBoardItemsByIds(boardId: number, itemIds: string[], onBatch?: (done: number, total: number) => void): Promise<MondayBoardItem[]> {
+  if (!itemIds.length) return [];
+  const query = `
+    query ($boardId: [ID!], $itemIds: [ID!]) {
+      boards(ids: $boardId) {
+        items(ids: $itemIds) {
+          id
+          name
+          column_values {
+            id
+            text
+            value
+          }
+        }
+      }
+    }
+  `;
+
+  const uniqueIds = Array.from(new Set(itemIds.filter(Boolean)));
+  const BATCH = 100;
+  const out: MondayBoardItem[] = [];
+
+  for (let i = 0; i < uniqueIds.length; i += BATCH) {
+    const batch = uniqueIds.slice(i, i + BATCH);
+    const res = await withTimeout(
+      monday.api(query, { variables: { boardId, itemIds: batch } }),
+      MONDAY_API_TIMEOUT_MS,
+      "Timed out fetching item details from Monday API."
+    );
+    const items = (res?.data?.boards?.[0]?.items ?? []) as MondayBoardItem[];
+    out.push(...items);
+    onBatch?.(Math.min(i + batch.length, uniqueIds.length), uniqueIds.length);
+    await sleep(40);
+  }
+
+  return out;
 }
 
 async function fetchJsonWithTimeout(url: string, timeoutMs = EXTERNAL_FETCH_TIMEOUT_MS): Promise<any | null> {
@@ -2626,21 +2665,10 @@ export default function App() {
     try {
       await withTimeout(
         (async () => {
-      log("Fetching board items from Monday...");
-      const allItems = await fetchBoardItemsForDeploy(boardId);
-      log(`Fetched ${allItems.length} board item(s).`);
-      if (!allItems.length) {
-        setStatus("No items found on this board.");
-        setProgress(null);
-        log("No items returned for board.");
-        return;
-      }
-
-      let scopedItems = allItems;
+      let scopedIds: string[] | null = null;
       if (trailerScope === "selected") {
-        const selectedIds = new Set(selectedItemIds.map((id) => String(id)));
-        scopedItems = allItems.filter((item) => selectedIds.has(String(item.id)));
-        log(`Scoped by selected items: ${scopedItems.length}.`);
+        scopedIds = selectedItemIds.map((id) => String(id));
+        log(`Selected scope IDs: ${scopedIds.length}.`);
       } else if (trailerScope === "group") {
         if (!trailerGroupId) {
           setStatus("Choose a trailer group first.");
@@ -2649,9 +2677,29 @@ export default function App() {
           return;
         }
         log(`Resolving group item IDs for group ${trailerGroupId}...`);
-        const ids = new Set((await fetchItemIds(boardId, "group", trailerGroupId)).map((id) => String(id)));
-        scopedItems = allItems.filter((item) => ids.has(String(item.id)));
-        log(`Scoped by group: ${scopedItems.length}.`);
+        scopedIds = (await fetchItemIds(boardId, "group", trailerGroupId)).map((id) => String(id));
+        log(`Group scope IDs: ${scopedIds.length}.`);
+      }
+
+      let scopedItems: MondayBoardItem[] = [];
+      if (scopedIds) {
+        if (!scopedIds.length) {
+          setStatus("No items found for selected trailer scope.");
+          setProgress(null);
+          log("No scoped IDs found.");
+          return;
+        }
+        log(`Fetching details for ${scopedIds.length} scoped item(s)...`);
+        scopedItems = await fetchBoardItemsByIds(boardId, scopedIds, (done, total) => {
+          setStatus(`Fetching scoped items... ${done}/${total}`);
+        });
+        log(`Fetched ${scopedItems.length} scoped item detail row(s).`);
+      } else {
+        log("Fetching board items from Monday...");
+        scopedItems = await fetchBoardItemsForDeploy(boardId, (loaded) => {
+          setStatus(`Fetching board items... ${loaded} loaded`);
+        });
+        log(`Fetched ${scopedItems.length} board item(s).`);
       }
 
       if (!scopedItems.length) {
