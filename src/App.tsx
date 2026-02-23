@@ -843,14 +843,18 @@ async function fetchBoardItemsForDeploy(boardId: number, onPage?: (loaded: numbe
 async function fetchBoardItemsByIds(boardId: number, itemIds: string[], onBatch?: (done: number, total: number) => void): Promise<MondayBoardItem[]> {
   if (!itemIds.length) return [];
   const query = `
-    query ($itemIds: [ID!]) {
-      items(ids: $itemIds) {
-        id
-        name
-        column_values {
-          id
-          text
-          value
+    query ($boardId: [ID!], $itemIds: [ID!]) {
+      boards(ids: $boardId) {
+        items_page(limit: 500, query_params: { ids: $itemIds }) {
+          items {
+            id
+            name
+            column_values {
+              id
+              text
+              value
+            }
+          }
         }
       }
     }
@@ -862,17 +866,18 @@ async function fetchBoardItemsByIds(boardId: number, itemIds: string[], onBatch?
 
   for (let i = 0; i < uniqueIds.length; i += BATCH) {
     const batch = uniqueIds.slice(i, i + BATCH);
-    const res = await withTimeout(monday.api(query, { variables: { itemIds: batch } }), MONDAY_API_TIMEOUT_MS, "Timed out fetching item details from Monday API.");
-    const items = (res?.data?.items ?? []) as MondayBoardItem[];
+    const res = await withTimeout(
+      monday.api(query, { variables: { boardId, itemIds: batch } }),
+      MONDAY_API_TIMEOUT_MS,
+      "Timed out fetching item details from Monday API."
+    );
+    const items = (res?.data?.boards?.[0]?.items_page?.items ?? []) as MondayBoardItem[];
     out.push(...items);
     onBatch?.(Math.min(i + batch.length, uniqueIds.length), uniqueIds.length);
     await sleep(40);
   }
 
-  if (out.length) return out;
-  const all = await fetchBoardItemsForDeploy(boardId, (loaded) => onBatch?.(Math.min(loaded, uniqueIds.length), uniqueIds.length));
-  const keep = new Set(uniqueIds);
-  return all.filter((item) => keep.has(String(item.id)));
+  return out;
 }
 
 async function fetchJsonWithTimeout(url: string, timeoutMs = EXTERNAL_FETCH_TIMEOUT_MS): Promise<any | null> {
