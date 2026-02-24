@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.3";
+const APP_VERSION = "1.2.4";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -16,6 +16,7 @@ const FETCH_CURSOR_MAX_PAGES = 80;
 const EXTERNAL_FETCH_TIMEOUT_MS = 12000;
 const MONDAY_API_TIMEOUT_MS = 25000;
 const TRAILER_RUN_TIMEOUT_MS = 300000;
+const TRAILER_TEST_GROUP_LIMIT = 10;
 const COL_CONTENT_TYPE = "status_1_mkn3yyv4";
 const COL_FOREIGN_TITLE = "text_mks31sjy";
 const COL_SEASON_YEAR_ALBUM = "text_mksd2s7y";
@@ -120,12 +121,18 @@ type TrailerReviewRow = {
   itemId: string;
   itemName: string;
   searchTitle: string;
+  translatedTitle: string;
+  yearText: string;
   matchedOn: string;
   matchScore: number;
   bestTmdbUrl: string;
+  bestLabel: string;
   alt1Url: string;
+  alt1Label: string;
   alt2Url: string;
+  alt2Label: string;
   youtubeUrl: string;
+  youtubeLabel: string;
   selectedChoice: TrailerChoice;
   status: "auto_applied" | "pending_review" | "applied" | "no_trailer" | "failed";
   note: string;
@@ -2729,8 +2736,9 @@ export default function App() {
         return "";
       }
     };
+    const getYearText = (item: MondayBoardItem): string => getItemColumnText(item, COL_SEASON_YEAR_ALBUM);
     const getYear = (item: MondayBoardItem): number | undefined => {
-      const yearText = getItemColumnText(item, COL_SEASON_YEAR_ALBUM);
+      const yearText = getYearText(item);
       const match = yearText.match(/\b(19|20)\d{2}\b/);
       return match ? Number(match[0]) : undefined;
     };
@@ -2755,7 +2763,7 @@ export default function App() {
       }
       return "";
     };
-    const youtubeFallback = async (title: string): Promise<string> => {
+    const youtubeFallback = async (title: string): Promise<{ url: string; label: string }> => {
       const searchUrl = qs("https://www.googleapis.com/youtube/v3/search", {
         key: YOUTUBE_API_KEY,
         q: `${title} trailer`,
@@ -2765,7 +2773,8 @@ export default function App() {
       });
       const json = await fetchJsonWithTimeout(searchUrl);
       const id = json?.items?.[0]?.id?.videoId;
-      return id ? `https://www.youtube.com/watch?v=${id}` : "";
+      const ytTitle = String(json?.items?.[0]?.snippet?.title ?? "").trim();
+      return id ? { url: `https://www.youtube.com/watch?v=${id}`, label: ytTitle || "YouTube result" } : { url: "", label: "" };
     };
 
     try {
@@ -2804,7 +2813,11 @@ export default function App() {
             const existingText = getItemColumnText(item, COL_TRAILER_LINK);
             return !existingUrl && !existingText;
           });
-          if (!items.length) {
+          const runItems = trailerScope === "group" ? items.slice(0, TRAILER_TEST_GROUP_LIMIT) : items;
+          if (trailerScope === "group" && items.length > TRAILER_TEST_GROUP_LIMIT) {
+            log(`Testing cap enabled: processing first ${TRAILER_TEST_GROUP_LIMIT} of ${items.length} group item(s).`);
+          }
+          if (!runItems.length) {
             setStatus("No trailer updates needed. All scoped items already have trailer links.");
             return;
           }
@@ -2813,14 +2826,15 @@ export default function App() {
           let updated = 0;
           let failed = 0;
           const reviewRows: TrailerReviewRow[] = [];
-          setProgress({ done: 0, total: items.length, ok: 0, failed: 0 });
+          setProgress({ done: 0, total: runItems.length, ok: 0, failed: 0 });
 
-          for (const item of items) {
+          for (const item of runItems) {
             const itemId = String(item.id);
             try {
               const foreignTitle = getItemColumnText(item, COL_FOREIGN_TITLE);
               const searchTitle = (foreignTitle || item.name || "").trim();
               if (!searchTitle) throw new Error("No title");
+              const yearText = getYearText(item);
 
               const year = getYear(item);
               const [movies, tv] = await Promise.all([tmdbSearch(searchTitle, "movie", year), tmdbSearch(searchTitle, "tv")]);
@@ -2837,7 +2851,12 @@ export default function App() {
               const bestTmdbUrl = best ? await tmdbFindTrailer(Number(best.id), best._media_type) : "";
               const alt1Url = alt1 ? await tmdbFindTrailer(Number(alt1.id), alt1._media_type) : "";
               const alt2Url = alt2 ? await tmdbFindTrailer(Number(alt2.id), alt2._media_type) : "";
-              const youtubeUrl = await youtubeFallback(searchTitle);
+              const youtube = await youtubeFallback(searchTitle);
+              const youtubeUrl = youtube.url;
+              const youtubeLabel = youtube.label;
+              const bestLabel = best ? `${String(best?.title ?? best?.name ?? "")} (${best?._media_type})` : "";
+              const alt1Label = alt1 ? `${String(alt1?.title ?? alt1?.name ?? "")} (${alt1?._media_type})` : "";
+              const alt2Label = alt2 ? `${String(alt2?.title ?? alt2?.name ?? "")} (${alt2?._media_type})` : "";
               const matchTitle = best ? `${String(best?.title ?? best?.name ?? "")} (${best?._media_type})` : "No TMDB match";
               const matchScore = Number(best?._score ?? 0);
 
@@ -2849,12 +2868,18 @@ export default function App() {
                   itemId,
                   itemName: String(item.name ?? ""),
                   searchTitle,
+                  translatedTitle: foreignTitle || "-",
+                  yearText: yearText || "-",
                   matchedOn: matchTitle,
                   matchScore,
                   bestTmdbUrl,
+                  bestLabel,
                   alt1Url,
+                  alt1Label,
                   alt2Url,
+                  alt2Label,
                   youtubeUrl,
+                  youtubeLabel,
                   selectedChoice: "best_tmdb",
                   status: "auto_applied",
                   note: "Auto-applied high confidence match.",
@@ -2865,12 +2890,18 @@ export default function App() {
                   itemId,
                   itemName: String(item.name ?? ""),
                   searchTitle,
+                  translatedTitle: foreignTitle || "-",
+                  yearText: yearText || "-",
                   matchedOn: matchTitle,
                   matchScore,
                   bestTmdbUrl,
+                  bestLabel,
                   alt1Url,
+                  alt1Label,
                   alt2Url,
+                  alt2Label,
                   youtubeUrl,
+                  youtubeLabel,
                   selectedChoice: "no_trailer",
                   status: "pending_review",
                   note: "Review required (low confidence or no direct trailer).",
@@ -2883,12 +2914,18 @@ export default function App() {
                 itemId,
                 itemName: String(item.name ?? ""),
                 searchTitle: String(item.name ?? ""),
+                translatedTitle: "-",
+                yearText: "-",
                 matchedOn: "-",
                 matchScore: 0,
                 bestTmdbUrl: "",
+                bestLabel: "",
                 alt1Url: "",
+                alt1Label: "",
                 alt2Url: "",
+                alt2Label: "",
                 youtubeUrl: "",
+                youtubeLabel: "",
                 selectedChoice: "no_trailer",
                 status: "failed",
                 note: error?.message ?? "Failed while searching",
@@ -2896,8 +2933,8 @@ export default function App() {
               log(`Item ${itemId}: failed (${error?.message ?? "unknown"}).`);
             } finally {
               done += 1;
-              setProgress({ done, total: items.length, ok: updated, failed });
-              setStatus(`Trailer links ${done}/${items.length} • Auto-applied: ${updated} • Failed: ${failed}`);
+              setProgress({ done, total: runItems.length, ok: updated, failed });
+              setStatus(`Trailer links ${done}/${runItems.length} • Auto-applied: ${updated} • Failed: ${failed}`);
             }
           }
 
@@ -3074,6 +3111,12 @@ export default function App() {
                           Searched title
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Translation
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Year/Season
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Matched on
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
@@ -3106,39 +3149,53 @@ export default function App() {
                             {row.itemName} ({row.itemId})
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.searchTitle}</td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.translatedTitle}</td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.yearText}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchedOn}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchScore}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <input
-                              type="checkbox"
-                              disabled={busy || !row.bestTmdbUrl}
-                              checked={row.selectedChoice === "best_tmdb"}
-                              onChange={() => setTrailerRowChoice(row.itemId, "best_tmdb")}
-                            />
+                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                              <input
+                                type="checkbox"
+                                disabled={busy || !row.bestTmdbUrl}
+                                checked={row.selectedChoice === "best_tmdb"}
+                                onChange={() => setTrailerRowChoice(row.itemId, "best_tmdb")}
+                              />
+                              <span>{row.bestLabel || "-"}</span>
+                            </label>
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <input
-                              type="checkbox"
-                              disabled={busy || !row.alt1Url}
-                              checked={row.selectedChoice === "alt_1"}
-                              onChange={() => setTrailerRowChoice(row.itemId, "alt_1")}
-                            />
+                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                              <input
+                                type="checkbox"
+                                disabled={busy || !row.alt1Url}
+                                checked={row.selectedChoice === "alt_1"}
+                                onChange={() => setTrailerRowChoice(row.itemId, "alt_1")}
+                              />
+                              <span>{row.alt1Label || "-"}</span>
+                            </label>
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <input
-                              type="checkbox"
-                              disabled={busy || !row.alt2Url}
-                              checked={row.selectedChoice === "alt_2"}
-                              onChange={() => setTrailerRowChoice(row.itemId, "alt_2")}
-                            />
+                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                              <input
+                                type="checkbox"
+                                disabled={busy || !row.alt2Url}
+                                checked={row.selectedChoice === "alt_2"}
+                                onChange={() => setTrailerRowChoice(row.itemId, "alt_2")}
+                              />
+                              <span>{row.alt2Label || "-"}</span>
+                            </label>
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <input
-                              type="checkbox"
-                              disabled={busy || !row.youtubeUrl}
-                              checked={row.selectedChoice === "youtube"}
-                              onChange={() => setTrailerRowChoice(row.itemId, "youtube")}
-                            />
+                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                              <input
+                                type="checkbox"
+                                disabled={busy || !row.youtubeUrl}
+                                checked={row.selectedChoice === "youtube"}
+                                onChange={() => setTrailerRowChoice(row.itemId, "youtube")}
+                              />
+                              <span>{row.youtubeLabel || "-"}</span>
+                            </label>
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
                             <input
