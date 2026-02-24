@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.12";
+const APP_VERSION = "1.2.13";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -138,6 +138,7 @@ type TrailerReviewRow = {
   youtubeLabel: string;
   imdbUrl: string;
   imdbLabel: string;
+  manualImdbUrl: string;
   elcinemaUrl: string;
   elcinemaLabel: string;
   lookupSource: string;
@@ -2706,10 +2707,13 @@ export default function App() {
         let noteParts: string[] = [];
         let appliedAny = false;
 
-        if (row.confirmImdb && row.imdbUrl) {
-          await setLinkColumnValue(row.itemId, COL_IMDB_LINK, row.imdbUrl, "IMDb");
+        const manualUrl = String(row.manualImdbUrl || "").trim();
+        const effectiveImdbUrl = manualUrl || row.imdbUrl;
+
+        if (row.confirmImdb && effectiveImdbUrl) {
+          await setLinkColumnValue(row.itemId, COL_IMDB_LINK, effectiveImdbUrl, "IMDb");
           appliedAny = true;
-          noteParts.push("IMDb link applied.");
+          noteParts.push(manualUrl ? "Manual IMDb link applied." : "IMDb link applied.");
         }
 
         if (row.confirmImage && row.posterUrl) {
@@ -2870,69 +2874,82 @@ export default function App() {
       const ytTitle = String(json?.items?.[0]?.snippet?.title ?? "").trim();
       return id ? { url: `https://www.youtube.com/watch?v=${id}`, label: ytTitle || "YouTube result" } : { url: "", label: "" };
     };
+    const buildSearchVariants = (title: string, year: number | undefined): string[] => {
+      const base = String(title || "").trim();
+      const vars = new Set<string>();
+      if (!base) return [];
+      vars.add(base);
+      if (year) vars.add(`${base} ${year}`);
+      vars.add(base.replace(/[:\-–—]/g, " ").replace(/\s+/g, " ").trim());
+      vars.add(base.replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim());
+      const noParens = base.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+      if (noParens) {
+        vars.add(noParens);
+        if (year) vars.add(`${noParens} ${year}`);
+      }
+      return Array.from(vars).filter(Boolean);
+    };
     const imdbSuggestFallback = async (
       title: string,
       year: number | undefined,
       preferredMedia: "movie" | "tv" | "any"
     ): Promise<{ url: string; label: string; posterUrl: string; matchedTitle: string; score: number; breakdown: string; resultCount: number; reason: string }> => {
-      const clean = String(title || "").trim();
-      if (!clean)
+      const variants = buildSearchVariants(title, year);
+      if (!variants.length)
         return { url: "", label: "", posterUrl: "", matchedTitle: "", score: 0, breakdown: "IMDb suggest: no title.", resultCount: 0, reason: "empty_title" };
-      const first = clean[0].toLowerCase();
-      const url = `https://v3.sg.media-imdb.com/suggestion/${encodeURIComponent(first)}/${encodeURIComponent(clean)}.json`;
-      const json = await fetchJsonWithTimeout(url);
-      const rows = Array.isArray(json?.d) ? json.d : [];
-      if (!rows.length)
+
+      let bestHit: any = null;
+      let totalRows = 0;
+      for (const clean of variants) {
+        const first = clean[0]?.toLowerCase();
+        if (!first) continue;
+        const url = `https://v3.sg.media-imdb.com/suggestion/${encodeURIComponent(first)}/${encodeURIComponent(clean)}.json`;
+        const json = await fetchJsonWithTimeout(url);
+        const rows = Array.isArray(json?.d) ? json.d : [];
+        totalRows += rows.length;
+        if (!rows.length) continue;
+        const searchNorm = normalizeTitleAscii(clean);
+        const scored = rows
+          .map((r: any) => {
+            const id = String(r?.id ?? "");
+            const matchedTitle = String(r?.l ?? "").trim();
+            const typeRaw = String(r?.q ?? "").toLowerCase();
+            const type = typeRaw.includes("tv") || typeRaw.includes("series") ? "tv" : "movie";
+            const y = Number(r?.y ?? 0) || 0;
+            const titleScore = movieTokenSetScore(clean, matchedTitle);
+            const candidateNorm = normalizeTitleAscii(matchedTitle);
+            const exactBoost = candidateNorm && candidateNorm === searchNorm ? 30 : candidateNorm && searchNorm.includes(candidateNorm) ? 8 : 0;
+            const yearBoost = year && y ? (year === y ? 22 : Math.max(-14, 10 - Math.abs(year - y) * 4)) : 0;
+            const mediaBoost = preferredMedia === "movie" ? (type === "movie" ? 12 : -12) : preferredMedia === "tv" ? (type === "tv" ? 12 : -12) : 0;
+            const total = titleScore + exactBoost + yearBoost + mediaBoost;
+            const imageUrl = String(r?.i?.imageUrl ?? "").trim();
+            return { id, matchedTitle, y, type, imageUrl, titleScore, exactBoost, yearBoost, mediaBoost, total, query: clean };
+          })
+          .sort((a: any, b: any) => b.total - a.total);
+        const top = scored[0];
+        if (!top?.id?.startsWith("tt")) continue;
+        if (!bestHit || Number(top.total) > Number(bestHit.total)) bestHit = top;
+      }
+
+      if (!bestHit)
         return {
           url: "",
           label: "",
           posterUrl: "",
           matchedTitle: "",
           score: 0,
-          breakdown: "IMDb suggest: no results.",
-          resultCount: 0,
-          reason: "no_results",
-        };
-
-      const searchNorm = normalizeTitleAscii(clean);
-      const scored = rows
-        .map((r: any) => {
-          const id = String(r?.id ?? "");
-          const matchedTitle = String(r?.l ?? "").trim();
-          const typeRaw = String(r?.q ?? "").toLowerCase();
-          const type = typeRaw.includes("tv") || typeRaw.includes("series") ? "tv" : "movie";
-          const y = Number(r?.y ?? 0) || 0;
-          const titleScore = movieTokenSetScore(clean, matchedTitle);
-          const candidateNorm = normalizeTitleAscii(matchedTitle);
-          const exactBoost = candidateNorm && candidateNorm === searchNorm ? 30 : candidateNorm && searchNorm.includes(candidateNorm) ? 8 : 0;
-          const yearBoost = year && y ? (year === y ? 22 : Math.max(-14, 10 - Math.abs(year - y) * 4)) : 0;
-          const mediaBoost = preferredMedia === "movie" ? (type === "movie" ? 12 : -12) : preferredMedia === "tv" ? (type === "tv" ? 12 : -12) : 0;
-          const total = titleScore + exactBoost + yearBoost + mediaBoost;
-          const imageUrl = String(r?.i?.imageUrl ?? "").trim();
-          return { id, matchedTitle, y, type, imageUrl, titleScore, exactBoost, yearBoost, mediaBoost, total };
-        })
-        .sort((a: any, b: any) => b.total - a.total);
-
-      const best = scored[0];
-      if (!best?.id?.startsWith("tt"))
-        return {
-          url: "",
-          label: "",
-          posterUrl: "",
-          matchedTitle: "",
-          score: 0,
-          breakdown: "IMDb suggest: no title-id result.",
-          resultCount: rows.length,
+          breakdown: "IMDb suggest: no title-id result across variants.",
+          resultCount: totalRows,
           reason: "no_title_id",
         };
       return {
-        url: `https://www.imdb.com/title/${best.id}/`,
-        label: `IMDb (${best.matchedTitle}${best.y ? ` ${best.y}` : ""})`,
-        posterUrl: best.imageUrl || "",
-        matchedTitle: best.matchedTitle,
-        score: Number(best.total || 0),
-        breakdown: `IMDb fallback: title=${best.titleScore}, exact=${best.exactBoost}, year=${best.yearBoost}, media=${best.mediaBoost}, total=${best.total}`,
-        resultCount: rows.length,
+        url: `https://www.imdb.com/title/${bestHit.id}/`,
+        label: `IMDb (${bestHit.matchedTitle}${bestHit.y ? ` ${bestHit.y}` : ""})`,
+        posterUrl: bestHit.imageUrl || "",
+        matchedTitle: bestHit.matchedTitle,
+        score: Number(bestHit.total || 0),
+        breakdown: `IMDb suggest(${bestHit.query}): title=${bestHit.titleScore}, exact=${bestHit.exactBoost}, year=${bestHit.yearBoost}, media=${bestHit.mediaBoost}, total=${bestHit.total}`,
+        resultCount: totalRows,
         reason: "ok",
       };
     };
@@ -2940,21 +2957,25 @@ export default function App() {
       title: string,
       year: number | undefined
     ): Promise<{ url: string; label: string; source: string; reason: string }> => {
-      const q = `${String(title || "").trim()} ${year || ""}`.trim();
-      const searchUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(q)}`;
-      const proxyUrl = `https://r.jina.ai/http://www.imdb.com/find/?q=${encodeURIComponent(q)}`;
-      const text = await fetchTextWithTimeout(proxyUrl);
-      if (!text) return { url: "", label: "IMDb search", source: "IMDb find fallback (no response)", reason: "no_response" };
-
-      const titleMatch = text.match(/https?:\/\/(?:www\.)?imdb\.com\/title\/tt\d+\/?/i);
-      if (titleMatch?.[0]) {
-        return { url: titleMatch[0], label: "IMDb title", source: "IMDb find first-title match", reason: "abs_title_match" };
+      const variants = buildSearchVariants(title, year);
+      if (!variants.length) return { url: "", label: "IMDb search", source: "IMDb find fallback (empty)", reason: "empty_title" };
+      let gotAnyResponse = false;
+      for (const base of variants) {
+        const q = `${base} ${year || ""}`.trim();
+        const proxyUrl = `https://r.jina.ai/http://www.imdb.com/find/?q=${encodeURIComponent(q)}`;
+        const text = await fetchTextWithTimeout(proxyUrl);
+        if (!text) continue;
+        gotAnyResponse = true;
+        const titleMatch = text.match(/https?:\/\/(?:www\.)?imdb\.com\/title\/tt\d+\/?/i);
+        if (titleMatch?.[0]) {
+          return { url: titleMatch[0], label: "IMDb title", source: "IMDb find first-title match", reason: `abs_title_match:${base}` };
+        }
+        const relMatch = text.match(/\/title\/tt\d+\/?/i);
+        if (relMatch?.[0]) {
+          return { url: `https://www.imdb.com${relMatch[0]}`, label: "IMDb title", source: "IMDb find first-title match", reason: `rel_title_match:${base}` };
+        }
       }
-      const relMatch = text.match(/\/title\/tt\d+\/?/i);
-      if (relMatch?.[0]) {
-        return { url: `https://www.imdb.com${relMatch[0]}`, label: "IMDb title", source: "IMDb find first-title match", reason: "rel_title_match" };
-      }
-      return { url: "", label: "IMDb search", source: "IMDb find fallback (search only)", reason: "search_only" };
+      return { url: "", label: "IMDb search", source: "IMDb find fallback (search only)", reason: gotAnyResponse ? "search_only" : "no_response" };
     };
     const elcinemaFallback = async (
       title: string,
@@ -3155,6 +3176,7 @@ export default function App() {
                 youtubeLabel,
                 imdbUrl: preferredReferenceUrl,
                 imdbLabel: preferredReferenceLabel,
+                manualImdbUrl: "",
                 elcinemaUrl: elcinema.url,
                 elcinemaLabel: elcinema.label,
                 lookupSource,
@@ -3188,6 +3210,7 @@ export default function App() {
                 youtubeLabel: "",
                 imdbUrl: `https://www.imdb.com/find/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 imdbLabel: "IMDb search",
+                manualImdbUrl: "",
                 elcinemaUrl: `https://elcinema.com/en/search/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 elcinemaLabel: "Elcinema search",
                 lookupSource: "Lookup error fallback",
@@ -3398,6 +3421,9 @@ export default function App() {
                           Confirm IMDb
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Manual IMDb URL
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Elcinema
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
@@ -3467,6 +3493,19 @@ export default function App() {
                                   prev.map((x) => (x.itemId === row.itemId ? { ...x, confirmImdb: e.target.checked } : x))
                                 )
                               }
+                            />
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            <input
+                              value={row.manualImdbUrl}
+                              onChange={(e) =>
+                                setTrailerReviewRows((prev) =>
+                                  prev.map((x) => (x.itemId === row.itemId ? { ...x, manualImdbUrl: e.target.value } : x))
+                                )
+                              }
+                              disabled={busy}
+                              placeholder="https://www.imdb.com/title/tt..."
+                              style={{ minWidth: 220 }}
                             />
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
