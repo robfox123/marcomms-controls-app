@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.7";
+const APP_VERSION = "1.2.8";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -127,6 +127,7 @@ type TrailerReviewRow = {
   yearText: string;
   matchedOn: string;
   matchScore: number;
+  matchBreakdown: string;
   bestTmdbUrl: string;
   bestLabel: string;
   alt1Url: string;
@@ -2832,7 +2833,7 @@ export default function App() {
       const imdbId = String(ext?.imdb_id ?? "").trim();
       const imdbUrl = imdbId ? `https://www.imdb.com/title/${imdbId}/` : "";
       const posterPath = String(details?.poster_path ?? "").trim();
-      const posterUrl = posterPath ? `https://image.tmdb.org/t/p/w154${posterPath}` : "";
+      const posterUrl = posterPath ? `https://image.tmdb.org/t/p/w342${posterPath}` : "";
       const localizedTitle = String(details?.title ?? details?.name ?? "").trim();
       const originalTitle = String(details?.original_title ?? details?.original_name ?? "").trim();
       const imdbLabel = imdbId ? (originalTitle ? `IMDb (${originalTitle})` : "IMDb title") : "IMDb search";
@@ -2940,7 +2941,16 @@ export default function App() {
                   const mediaBoost =
                     preferredMedia === "movie" ? (r?._media_type === "movie" ? 12 : -12) : preferredMedia === "tv" ? (r?._media_type === "tv" ? 12 : -12) : 0;
                   const rank = titleScore + exactTitleBoost + yearBoost + mediaBoost;
-                  return { ...r, _score: titleScore, _rank: rank };
+                  return {
+                    ...r,
+                    _score: titleScore,
+                    _rank: rank,
+                    _titleScore: titleScore,
+                    _exactTitleBoost: exactTitleBoost,
+                    _yearBoost: yearBoost,
+                    _mediaBoost: mediaBoost,
+                    _candidateYear: candidateYear,
+                  };
                 })
                 .sort((a: any, b: any) => Number(b?._rank ?? 0) - Number(a?._rank ?? 0));
 
@@ -2960,10 +2970,18 @@ export default function App() {
               const alt2Label = alt2 ? `${String(alt2?.title ?? alt2?.name ?? "")} (${alt2?._media_type})` : "";
               const matchTitle = best ? `${String(best?.title ?? best?.name ?? "")} (${best?._media_type})` : "No TMDB match";
               const matchScore = Number(best?._rank ?? best?._score ?? 0);
+              const bestYear = Number(best?._candidateYear ?? 0) || 0;
+              const matchBreakdown = best
+                ? `title=${Number(best?._titleScore ?? 0)}, exact=${Number(best?._exactTitleBoost ?? 0)}, year=${Number(best?._yearBoost ?? 0)}, media=${Number(best?._mediaBoost ?? 0)}, total=${matchScore}${bestYear ? `, matchedYear=${bestYear}` : ""}`
+                : "No TMDB candidate scored.";
               const extMeta = best ? await tmdbExternalMeta(Number(best.id), best._media_type) : null;
-              const imdbUrl = extMeta?.imdbUrl || `https://www.imdb.com/find/?q=${encodeURIComponent(`${searchTitle} ${yearText || ""}`.trim())}`;
+              const imdbFallbackTitle = bestTitle || searchTitle;
+              const imdbFallbackYear = bestYear || year || 0;
+              const imdbUrl =
+                extMeta?.imdbUrl ||
+                `https://www.imdb.com/find/?q=${encodeURIComponent(`${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""}`.trim())}`;
               const imdbLabel = extMeta?.imdbLabel || (bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search");
-              const posterUrl = extMeta?.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w154${String(best.poster_path)}` : "");
+              const posterUrl = extMeta?.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : "");
               const translatedTitle = extMeta?.translatedTitle || bestTitle || foreignTitle || "-";
 
               reviewRows.push({
@@ -2974,6 +2992,7 @@ export default function App() {
                 yearText: yearText || "-",
                 matchedOn: matchTitle,
                 matchScore,
+                matchBreakdown,
                 bestTmdbUrl,
                 bestLabel,
                 alt1Url,
@@ -3002,6 +3021,7 @@ export default function App() {
                 yearText: "-",
                 matchedOn: "-",
                 matchScore: 0,
+                matchBreakdown: "No match scoring available (lookup error).",
                 bestTmdbUrl: "",
                 bestLabel: "",
                 alt1Url: "",
@@ -3224,6 +3244,9 @@ export default function App() {
                           Score
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Match breakdown
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Status
                         </th>
                       </tr>
@@ -3239,7 +3262,7 @@ export default function App() {
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.yearText}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
                             {row.posterUrl ? (
-                              <img src={row.posterUrl} alt={row.itemName} style={{ width: 46, height: 69, objectFit: "cover", borderRadius: 2 }} />
+                              <img src={row.posterUrl} alt={row.itemName} style={{ width: 84, height: 126, objectFit: "cover", borderRadius: 2 }} />
                             ) : (
                               "-"
                             )}
@@ -3279,6 +3302,7 @@ export default function App() {
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchedOn}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchScore}</td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9", maxWidth: 280 }}>{row.matchBreakdown}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
                             {row.status}
                             {row.note ? ` - ${row.note}` : ""}
