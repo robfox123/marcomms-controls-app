@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.6";
+const APP_VERSION = "1.2.7";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -2910,15 +2910,39 @@ export default function App() {
               const searchTitle = (foreignTitle || item.name || "").trim();
               if (!searchTitle) throw new Error("No title");
               const yearText = getYearText(item);
+              const contentType = String(getItemColumnText(item, COL_CONTENT_TYPE) || "").toLowerCase();
+              const preferredMedia: "movie" | "tv" | "any" = contentType.includes("movie") || contentType.includes("film")
+                ? "movie"
+                : contentType.includes("tv") || contentType.includes("series")
+                  ? "tv"
+                  : "any";
 
               const year = getYear(item);
-              const [movies, tv] = await Promise.all([tmdbSearch(searchTitle, "movie", year), tmdbSearch(searchTitle, "tv")]);
-              const scored = [...movies.map((r: any) => ({ ...r, _media_type: "movie" as const })), ...tv.map((r: any) => ({ ...r, _media_type: "tv" as const }))]
+              const movieResults = preferredMedia === "tv" ? [] : await tmdbSearch(searchTitle, "movie", year);
+              const tvResults = preferredMedia === "movie" ? [] : await tmdbSearch(searchTitle, "tv");
+
+              const searchNorm = normalizeTitleAscii(searchTitle);
+              const scored = [...movieResults.map((r: any) => ({ ...r, _media_type: "movie" as const })), ...tvResults.map((r: any) => ({ ...r, _media_type: "tv" as const }))]
                 .map((r: any) => {
                   const candidate = String(r?.title ?? r?.name ?? "");
-                  return { ...r, _score: movieTokenSetScore(searchTitle, candidate) };
+                  const candidateNorm = normalizeTitleAscii(candidate);
+                  const titleScore = movieTokenSetScore(searchTitle, candidate);
+                  const exactTitleBoost = candidateNorm && candidateNorm === searchNorm ? 30 : candidateNorm && searchNorm.includes(candidateNorm) ? 8 : 0;
+                  const dateRaw = String(r?._media_type === "movie" ? r?.release_date ?? "" : r?.first_air_date ?? "");
+                  const yMatch = dateRaw.match(/^(\d{4})/);
+                  const candidateYear = yMatch ? Number(yMatch[1]) : null;
+                  const yearBoost =
+                    year && candidateYear
+                      ? candidateYear === year
+                        ? 22
+                        : Math.max(-14, 10 - Math.abs(candidateYear - year) * 4)
+                      : 0;
+                  const mediaBoost =
+                    preferredMedia === "movie" ? (r?._media_type === "movie" ? 12 : -12) : preferredMedia === "tv" ? (r?._media_type === "tv" ? 12 : -12) : 0;
+                  const rank = titleScore + exactTitleBoost + yearBoost + mediaBoost;
+                  return { ...r, _score: titleScore, _rank: rank };
                 })
-                .sort((a: any, b: any) => Number(b?._score ?? 0) - Number(a?._score ?? 0));
+                .sort((a: any, b: any) => Number(b?._rank ?? 0) - Number(a?._rank ?? 0));
 
               const best = scored[0];
               const alt1 = scored[1];
@@ -2935,7 +2959,7 @@ export default function App() {
               const alt1Label = alt1 ? `${String(alt1?.title ?? alt1?.name ?? "")} (${alt1?._media_type})` : "";
               const alt2Label = alt2 ? `${String(alt2?.title ?? alt2?.name ?? "")} (${alt2?._media_type})` : "";
               const matchTitle = best ? `${String(best?.title ?? best?.name ?? "")} (${best?._media_type})` : "No TMDB match";
-              const matchScore = Number(best?._score ?? 0);
+              const matchScore = Number(best?._rank ?? best?._score ?? 0);
               const extMeta = best ? await tmdbExternalMeta(Number(best.id), best._media_type) : null;
               const imdbUrl = extMeta?.imdbUrl || `https://www.imdb.com/find/?q=${encodeURIComponent(`${searchTitle} ${yearText || ""}`.trim())}`;
               const imdbLabel = extMeta?.imdbLabel || (bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search");
