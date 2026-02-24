@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.5";
+const APP_VERSION = "1.2.6";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -21,6 +21,8 @@ const COL_CONTENT_TYPE = "status_1_mkn3yyv4";
 const COL_FOREIGN_TITLE = "text_mks31sjy";
 const COL_SEASON_YEAR_ALBUM = "text_mksd2s7y";
 const COL_TRAILER_LINK = "link_mks3yxj3";
+const COL_IMDB_LINK = "link_mm0wf2nf";
+const COL_SUGGESTED_IMAGE_FILE = "file_mkszyxdh";
 const COL_CYCLE = "text_mkxga9d";
 const COL_CYCLE_EXPIRED = "text_mm0pw9kx";
 const COL_CYCLE_EXPIRED_FALLBACK = "lookup_mm0p6m5c";
@@ -135,6 +137,8 @@ type TrailerReviewRow = {
   youtubeLabel: string;
   imdbUrl: string;
   imdbLabel: string;
+  posterUrl: string;
+  confirmImage: boolean;
   selectedChoice: TrailerChoice;
   status: "auto_applied" | "pending_review" | "applied" | "no_trailer" | "failed";
   note: string;
@@ -2600,6 +2604,44 @@ export default function App() {
     });
   }
 
+  async function setLinkColumnValue(itemId: string, columnId: string, url: string, text: string) {
+    if (!boardId) throw new Error("Board context not ready yet.");
+    const mutation = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+        change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
+          id
+        }
+      }
+    `;
+    await monday.api(mutation, {
+      variables: {
+        boardId,
+        itemId,
+        columnId,
+        value: JSON.stringify({ url, text }),
+      },
+    });
+  }
+
+  async function setFileColumnFromUrl(itemId: string, imageUrl: string) {
+    if (!boardId) throw new Error("Board context not ready yet.");
+    const mutation = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+        change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
+          id
+        }
+      }
+    `;
+    await monday.api(mutation, {
+      variables: {
+        boardId,
+        itemId,
+        columnId: COL_SUGGESTED_IMAGE_FILE,
+        value: JSON.stringify({ files: [{ url: imageUrl, name: "imdb_preview.jpg" }] }),
+      },
+    });
+  }
+
   async function clearTrailerLinkValue(itemId: string) {
     if (!boardId) throw new Error("Board context not ready yet.");
     const mutation = `
@@ -2655,11 +2697,23 @@ export default function App() {
 
         if (url) {
           await setTrailerLinkValue(row.itemId, url, text);
+          if (row.imdbUrl) {
+            await setLinkColumnValue(row.itemId, COL_IMDB_LINK, row.imdbUrl, "IMDb");
+          }
+          let note = `Applied ${text} link.`;
+          if (row.confirmImage && row.posterUrl) {
+            try {
+              await setFileColumnFromUrl(row.itemId, row.posterUrl);
+              note = `${note} Image sent to file column.`;
+            } catch (fileErr: any) {
+              note = `${note} Image file write failed: ${fileErr?.message ?? "unsupported by API context"}.`;
+            }
+          }
           ok += 1;
           setTrailerReviewRows((prev) =>
             prev.map((x) =>
               x.itemId === row.itemId
-                ? { ...x, status: row.selectedChoice === "no_trailer" || text === "IMDb" ? "no_trailer" : "applied", note: `Applied ${text} link.` }
+                ? { ...x, status: row.selectedChoice === "no_trailer" || text === "IMDb" ? "no_trailer" : "applied", note }
                 : x
             )
           );
@@ -2776,6 +2830,22 @@ export default function App() {
       }
       return "";
     };
+    const tmdbExternalMeta = async (
+      id: number,
+      mediaType: "movie" | "tv"
+    ): Promise<{ imdbUrl: string; imdbLabel: string; posterUrl: string; translatedTitle: string }> => {
+      const detailsUrl = qs(`https://api.themoviedb.org/3/${mediaType}/${id}`, { api_key: TMDB_API_KEY });
+      const extUrl = qs(`https://api.themoviedb.org/3/${mediaType}/${id}/external_ids`, { api_key: TMDB_API_KEY });
+      const [details, ext] = await Promise.all([fetchJsonWithTimeout(detailsUrl), fetchJsonWithTimeout(extUrl)]);
+      const imdbId = String(ext?.imdb_id ?? "").trim();
+      const imdbUrl = imdbId ? `https://www.imdb.com/title/${imdbId}/` : "";
+      const posterPath = String(details?.poster_path ?? "").trim();
+      const posterUrl = posterPath ? `https://image.tmdb.org/t/p/w154${posterPath}` : "";
+      const localizedTitle = String(details?.title ?? details?.name ?? "").trim();
+      const originalTitle = String(details?.original_title ?? details?.original_name ?? "").trim();
+      const imdbLabel = imdbId ? (originalTitle ? `IMDb (${originalTitle})` : "IMDb title") : "IMDb search";
+      return { imdbUrl, imdbLabel, posterUrl, translatedTitle: localizedTitle || originalTitle || "" };
+    };
     const youtubeFallback = async (title: string): Promise<{ url: string; label: string }> => {
       const searchUrl = qs("https://www.googleapis.com/youtube/v3/search", {
         key: YOUTUBE_API_KEY,
@@ -2869,14 +2939,16 @@ export default function App() {
               const youtubeLabel = youtube.label;
               const bestTitle = String(best?.title ?? best?.name ?? "").trim();
               const bestOriginal = String(best?.original_title ?? best?.original_name ?? "").trim();
-              const translatedTitle = bestTitle || foreignTitle || "-";
               const bestLabel = best ? `${bestTitle || "-"} (${best?._media_type})` : "";
               const alt1Label = alt1 ? `${String(alt1?.title ?? alt1?.name ?? "")} (${alt1?._media_type})` : "";
               const alt2Label = alt2 ? `${String(alt2?.title ?? alt2?.name ?? "")} (${alt2?._media_type})` : "";
               const matchTitle = best ? `${String(best?.title ?? best?.name ?? "")} (${best?._media_type})` : "No TMDB match";
               const matchScore = Number(best?._score ?? 0);
-              const imdbUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(`${searchTitle} ${yearText || ""}`.trim())}`;
-              const imdbLabel = bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search";
+              const extMeta = best ? await tmdbExternalMeta(Number(best.id), best._media_type) : null;
+              const imdbUrl = extMeta?.imdbUrl || `https://www.imdb.com/find/?q=${encodeURIComponent(`${searchTitle} ${yearText || ""}`.trim())}`;
+              const imdbLabel = extMeta?.imdbLabel || (bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search");
+              const posterUrl = extMeta?.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w154${String(best.poster_path)}` : "");
+              const translatedTitle = extMeta?.translatedTitle || bestTitle || foreignTitle || "-";
 
               const hasAnyTrailerOption = Boolean(bestTmdbUrl || alt1Url || alt2Url || youtubeUrl);
 
@@ -2902,6 +2974,8 @@ export default function App() {
                   youtubeLabel,
                   imdbUrl,
                   imdbLabel,
+                  posterUrl,
+                  confirmImage: false,
                   selectedChoice: "best_tmdb",
                   status: "auto_applied",
                   note: "Auto-applied high confidence match.",
@@ -2928,6 +3002,8 @@ export default function App() {
                   youtubeLabel,
                   imdbUrl,
                   imdbLabel,
+                  posterUrl,
+                  confirmImage: false,
                   selectedChoice: "no_trailer",
                   status: "auto_applied",
                   note: "No trailer found. IMDb link applied.",
@@ -2978,6 +3054,8 @@ export default function App() {
                 youtubeLabel: "",
                 imdbUrl: `https://www.imdb.com/find/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 imdbLabel: "IMDb search",
+                posterUrl: "",
+                confirmImage: false,
                 selectedChoice: "no_trailer",
                 status: "failed",
                 note: error?.message ?? "Failed while searching",
@@ -3169,6 +3247,12 @@ export default function App() {
                           Year/Season
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          IMDb image
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Confirm image
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Matched on
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
@@ -3203,6 +3287,25 @@ export default function App() {
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.searchTitle}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.translatedTitle}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.yearText}</td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            {row.posterUrl ? (
+                              <img src={row.posterUrl} alt={row.itemName} style={{ width: 46, height: 69, objectFit: "cover", borderRadius: 2 }} />
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            <input
+                              type="checkbox"
+                              disabled={busy || !row.posterUrl}
+                              checked={row.confirmImage}
+                              onChange={(e) =>
+                                setTrailerReviewRows((prev) =>
+                                  prev.map((x) => (x.itemId === row.itemId ? { ...x, confirmImage: e.target.checked } : x))
+                                )
+                              }
+                            />
+                          </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchedOn}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchScore}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
