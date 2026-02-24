@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.10";
+const APP_VERSION = "1.2.11";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -2912,6 +2912,26 @@ export default function App() {
         breakdown: `IMDb fallback: title=${best.titleScore}, exact=${best.exactBoost}, year=${best.yearBoost}, media=${best.mediaBoost}, total=${best.total}`,
       };
     };
+    const imdbFindDirectFallback = async (
+      title: string,
+      year: number | undefined
+    ): Promise<{ url: string; label: string; source: string }> => {
+      const q = `${String(title || "").trim()} ${year || ""}`.trim();
+      const searchUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(q)}`;
+      const proxyUrl = `https://r.jina.ai/http://www.imdb.com/find/?q=${encodeURIComponent(q)}`;
+      const text = await fetchTextWithTimeout(proxyUrl);
+      if (!text) return { url: "", label: "IMDb search", source: "IMDb find fallback (no response)" };
+
+      const titleMatch = text.match(/https?:\/\/(?:www\.)?imdb\.com\/title\/tt\d+\/?/i);
+      if (titleMatch?.[0]) {
+        return { url: titleMatch[0], label: "IMDb title", source: "IMDb find first-title match" };
+      }
+      const relMatch = text.match(/\/title\/tt\d+\/?/i);
+      if (relMatch?.[0]) {
+        return { url: `https://www.imdb.com${relMatch[0]}`, label: "IMDb title", source: "IMDb find first-title match" };
+      }
+      return { url: "", label: "IMDb search", source: "IMDb find fallback (search only)" };
+    };
     const elcinemaFallback = async (
       title: string,
       year: number | undefined
@@ -3054,23 +3074,27 @@ export default function App() {
                 : "No TMDB candidate scored.";
               const extMeta = best ? await tmdbExternalMeta(Number(best.id), best._media_type) : null;
               const imdbSuggest = await imdbSuggestFallback(searchTitle, year, preferredMedia);
+              const imdbFindDirect = await imdbFindDirectFallback(searchTitle, year);
               const elcinema = await elcinemaFallback(searchTitle, year);
               const imdbFallbackTitle = bestTitle || searchTitle;
               const imdbFallbackYear = bestYear || year || 0;
               const imdbFindUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(`${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""}`.trim())}`;
-              const preferredReferenceUrl = extMeta?.imdbUrl || imdbSuggest.url || elcinema.url || imdbFindUrl;
+              const preferredReferenceUrl = extMeta?.imdbUrl || imdbSuggest.url || imdbFindDirect.url || elcinema.url || imdbFindUrl;
               const preferredReferenceLabel =
                 extMeta?.imdbLabel ||
                 imdbSuggest.label ||
+                imdbFindDirect.label ||
                 elcinema.label ||
                 (bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search");
               const lookupSource = extMeta?.imdbUrl
                 ? "TMDB external IMDb ID"
                 : imdbSuggest.url
                   ? "IMDb suggest match"
-                  : elcinema.source
-                    ? elcinema.source
-                    : "IMDb search fallback";
+                  : imdbFindDirect.url
+                    ? imdbFindDirect.source
+                    : elcinema.source
+                      ? elcinema.source
+                      : "IMDb search fallback";
               const posterUrl = extMeta?.posterUrl || imdbSuggest.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : "");
               const translatedTitle = extMeta?.translatedTitle || bestTitle || imdbSuggest.matchedTitle || foreignTitle || "-";
               if (!best && imdbSuggest.matchedTitle) {
