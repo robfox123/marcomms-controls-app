@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.2";
+const APP_VERSION = "1.2.3";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -34,6 +34,7 @@ const YOUTUBE_API_KEY = "AIzaSyCRKi5aWBsGMujtb0u-HjtuXHrzHC7_txA";
 
 type Scope = "selected" | "group" | "board";
 type TrailerMode = "auto_mark_na" | "auto_only";
+type TrailerChoice = "best_tmdb" | "alt_1" | "alt_2" | "youtube" | "no_trailer";
 type Workflow = "home" | "align" | "pg" | "archive";
 type Group = { id: string; title: string };
 type Progress = { done: number; total: number; ok: number; failed: number };
@@ -114,6 +115,20 @@ type MondayBoardItem = {
   id: string;
   name?: string | null;
   column_values?: Array<{ id: string; text?: string | null; value?: unknown }>;
+};
+type TrailerReviewRow = {
+  itemId: string;
+  itemName: string;
+  searchTitle: string;
+  matchedOn: string;
+  matchScore: number;
+  bestTmdbUrl: string;
+  alt1Url: string;
+  alt2Url: string;
+  youtubeUrl: string;
+  selectedChoice: TrailerChoice;
+  status: "auto_applied" | "pending_review" | "applied" | "no_trailer" | "failed";
+  note: string;
 };
 type PgDeployUpdate = {
   columnId: string;
@@ -1175,6 +1190,7 @@ export default function App() {
   const [trailerScope, setTrailerScope] = useState<Scope>("selected");
   const [trailerMode, setTrailerMode] = useState<TrailerMode>("auto_mark_na");
   const [trailerLogs, setTrailerLogs] = useState<string[]>([]);
+  const [trailerReviewRows, setTrailerReviewRows] = useState<TrailerReviewRow[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupId, setGroupId] = useState<string>("");
   const [trailerGroupId, setTrailerGroupId] = useState<string>("");
@@ -2556,6 +2572,135 @@ export default function App() {
     }
   }
 
+  async function setTrailerLinkValue(itemId: string, url: string, text: string) {
+    if (!boardId) throw new Error("Board context not ready yet.");
+    const mutation = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+        change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
+          id
+        }
+      }
+    `;
+    await monday.api(mutation, {
+      variables: {
+        boardId,
+        itemId,
+        columnId: COL_TRAILER_LINK,
+        value: JSON.stringify({ url, text }),
+      },
+    });
+  }
+
+  async function clearTrailerLinkValue(itemId: string) {
+    if (!boardId) throw new Error("Board context not ready yet.");
+    const mutation = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+        change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
+          id
+        }
+      }
+    `;
+    await monday.api(mutation, {
+      variables: {
+        boardId,
+        itemId,
+        columnId: COL_TRAILER_LINK,
+        value: "{}",
+      },
+    });
+  }
+
+  function setTrailerRowChoice(itemId: string, choice: TrailerChoice) {
+    setTrailerReviewRows((prev) => prev.map((row) => (row.itemId === itemId ? { ...row, selectedChoice: choice } : row)));
+  }
+
+  async function applyTrailerReviewSelections() {
+    if (!trailerReviewRows.length) {
+      setStatus("No trailer review rows to apply.");
+      return;
+    }
+    if (!boardId) {
+      setStatus("Board context not ready yet.");
+      return;
+    }
+
+    setBusy(true);
+    setProgress({ done: 0, total: trailerReviewRows.length, ok: 0, failed: 0 });
+    let done = 0;
+    let ok = 0;
+    let failed = 0;
+
+    for (const row of trailerReviewRows) {
+      try {
+        let url = "";
+        if (row.selectedChoice === "best_tmdb") url = row.bestTmdbUrl;
+        if (row.selectedChoice === "alt_1") url = row.alt1Url;
+        if (row.selectedChoice === "alt_2") url = row.alt2Url;
+        if (row.selectedChoice === "youtube") url = row.youtubeUrl;
+
+        if (row.selectedChoice === "no_trailer" || !url) {
+          setTrailerReviewRows((prev) =>
+            prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "no_trailer", note: "No trailer selected." } : x))
+          );
+        } else {
+          await setTrailerLinkValue(row.itemId, url, "Trailer");
+          setTrailerReviewRows((prev) => prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "applied", note: "Applied." } : x)));
+          ok += 1;
+        }
+      } catch (error: any) {
+        failed += 1;
+        setTrailerReviewRows((prev) =>
+          prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "failed", note: error?.message ?? "Failed to apply." } : x))
+        );
+      } finally {
+        done += 1;
+        setProgress({ done, total: trailerReviewRows.length, ok, failed });
+      }
+    }
+    setStatus(`Trailer review apply complete. Applied: ${ok}, Failed: ${failed}.`);
+    setBusy(false);
+  }
+
+  async function removeTrailersForSelectedGroup() {
+    if (!boardId) {
+      setStatus("Board context not ready yet.");
+      return;
+    }
+    if (!trailerGroupId) {
+      setStatus("Select a group first.");
+      return;
+    }
+
+    setBusy(true);
+    setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
+    setStatus(`Loading items for group ${trailerGroupId}...`);
+    try {
+      const ids = await fetchItemIds(boardId, "group", trailerGroupId);
+      if (!ids.length) {
+        setStatus("No items in selected group.");
+        return;
+      }
+      setProgress({ done: 0, total: ids.length, ok: 0, failed: 0 });
+      let done = 0;
+      let ok = 0;
+      let failed = 0;
+      for (const id of ids) {
+        try {
+          await clearTrailerLinkValue(String(id));
+          ok += 1;
+        } catch {
+          failed += 1;
+        } finally {
+          done += 1;
+          setProgress({ done, total: ids.length, ok, failed });
+        }
+      }
+      setStatus(`Removed trailer links for group items. Cleared: ${ok}, Failed: ${failed}.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runTrailerLinks() {
     if (!boardId) {
       setStatus("Board context not ready yet.");
@@ -2565,16 +2710,13 @@ export default function App() {
     setBusy(true);
     setFailedUpdates([]);
     setTrailerLogs([]);
+    setTrailerReviewRows([]);
     setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
     setStatus("Trailer links run started...");
     const log = (line: string) => {
       const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
       setTrailerLogs((prev) => [...prev.slice(-299), `[${stamp}] ${line}`]);
     };
-    log(`Run started. Scope=${trailerScope}, mode=${trailerMode}`);
-
-    const NA_URL = "https://www.imdb.com";
-    const NA_TEXT = "NOT AVAILABLE";
 
     const getExistingLinkUrl = (item: MondayBoardItem): string => {
       const col = getItemColumn(item, COL_TRAILER_LINK);
@@ -2587,14 +2729,11 @@ export default function App() {
         return "";
       }
     };
-
     const getYear = (item: MondayBoardItem): number | undefined => {
       const yearText = getItemColumnText(item, COL_SEASON_YEAR_ALBUM);
       const match = yearText.match(/\b(19|20)\d{2}\b/);
-      if (!match) return undefined;
-      return Number(match[0]);
+      return match ? Number(match[0]) : undefined;
     };
-
     const tmdbSearch = async (title: string, mediaType: "movie" | "tv", year?: number) => {
       const url = qs(`https://api.themoviedb.org/3/search/${mediaType}`, {
         api_key: TMDB_API_KEY,
@@ -2602,36 +2741,21 @@ export default function App() {
         year: mediaType === "movie" ? year : undefined,
       });
       const json = await fetchJsonWithTimeout(url);
-      if (!json) return [];
       return Array.isArray(json?.results) ? json.results : [];
     };
-
-    const tmdbFindOfficialTrailer = async (id: number, mediaType: "movie" | "tv"): Promise<string | null> => {
+    const tmdbFindTrailer = async (id: number, mediaType: "movie" | "tv"): Promise<string> => {
       const url = qs(`https://api.themoviedb.org/3/${mediaType}/${id}/videos`, { api_key: TMDB_API_KEY });
       const json = await fetchJsonWithTimeout(url);
-      if (!json) return null;
       const videos = Array.isArray(json?.results) ? json.results : [];
       for (const video of videos) {
-        const site = String(video?.site ?? "");
-        const type = String(video?.type ?? "");
+        const isYt = String(video?.site ?? "") === "YouTube";
+        const isTrailer = String(video?.type ?? "") === "Trailer";
         const key = String(video?.key ?? "");
-        const name = String(video?.name ?? "").toLowerCase();
-        if (site === "YouTube" && type === "Trailer" && key && name.includes("official")) {
-          return `https://www.youtube.com/watch?v=${key}`;
-        }
+        if (isYt && isTrailer && key) return `https://www.youtube.com/watch?v=${key}`;
       }
-      for (const video of videos) {
-        const site = String(video?.site ?? "");
-        const type = String(video?.type ?? "");
-        const key = String(video?.key ?? "");
-        if (site === "YouTube" && type === "Trailer" && key) {
-          return `https://www.youtube.com/watch?v=${key}`;
-        }
-      }
-      return null;
+      return "";
     };
-
-    const youtubeFallback = async (title: string): Promise<string | null> => {
+    const youtubeFallback = async (title: string): Promise<string> => {
       const searchUrl = qs("https://www.googleapis.com/youtube/v3/search", {
         key: YOUTUBE_API_KEY,
         q: `${title} trailer`,
@@ -2640,172 +2764,152 @@ export default function App() {
         type: "video",
       });
       const json = await fetchJsonWithTimeout(searchUrl);
-      if (!json) return null;
       const id = json?.items?.[0]?.id?.videoId;
-      if (!id) return null;
-      return `https://www.youtube.com/watch?v=${id}`;
-    };
-
-    const setLinkColumn = async (itemId: string, url: string, text: string) => {
-      const mutation = `
-        mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
-          change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
-            id
-          }
-        }
-      `;
-      await monday.api(mutation, {
-        variables: {
-          boardId,
-          itemId,
-          columnId: COL_TRAILER_LINK,
-          value: JSON.stringify({ url, text }),
-        },
-      });
+      return id ? `https://www.youtube.com/watch?v=${id}` : "";
     };
 
     try {
       await withTimeout(
         (async () => {
-      let scopedIds: string[] | null = null;
-      if (trailerScope === "selected") {
-        scopedIds = selectedItemIds.map((id) => String(id));
-        log(`Selected scope IDs: ${scopedIds.length}.`);
-      } else if (trailerScope === "group") {
-        if (!trailerGroupId) {
-          setStatus("Choose a trailer group first.");
-          setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
-          log("Stopped: group scope chosen with no group ID.");
-          return;
-        }
-        log(`Resolving group item IDs for group ${trailerGroupId}...`);
-        scopedIds = (await fetchItemIds(boardId, "group", trailerGroupId)).map((id) => String(id));
-        log(`Group scope IDs: ${scopedIds.length}.`);
-      }
-
-      let scopedItems: MondayBoardItem[] = [];
-      if (scopedIds) {
-        if (!scopedIds.length) {
-          setStatus("No items found for selected trailer scope.");
-          setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
-          log("No scoped IDs found.");
-          return;
-        }
-        log(`Fetching details for ${scopedIds.length} scoped item(s)...`);
-        scopedItems = await fetchBoardItemsByIds(boardId, scopedIds, (done, total) => {
-          setStatus(`Fetching scoped items... ${done}/${total}`);
-        });
-        log(`Fetched ${scopedItems.length} scoped item detail row(s).`);
-      } else {
-        log("Fetching board items from Monday...");
-        scopedItems = await fetchBoardItemsForDeploy(boardId, (loaded) => {
-          setStatus(`Fetching board items... ${loaded} loaded`);
-        });
-        log(`Fetched ${scopedItems.length} board item(s).`);
-      }
-
-      if (!scopedItems.length) {
-        setStatus("No items found for selected trailer scope.");
-        setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
-        log("No scoped items found.");
-        return;
-      }
-
-      const items = scopedItems.filter((item) => {
-        const existingUrl = getExistingLinkUrl(item);
-        const existingText = getItemColumnText(item, COL_TRAILER_LINK);
-        return !existingUrl && !existingText;
-      });
-
-      if (!items.length) {
-        setStatus("No trailer updates needed. All scoped items already have trailer links.");
-        setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
-        log("All scoped items already had trailer links.");
-        return;
-      }
-
-      let done = 0;
-      let updated = 0;
-      let skipped = 0;
-      let failed = 0;
-      let noMatch = 0;
-
-      setProgress({ done: 0, total: items.length, ok: 0, failed: 0 });
-      setStatus(`Processing trailer links for ${items.length} item(s) in ${trailerScopeHint.toLowerCase()}...`);
-      log(`Processing ${items.length} missing-link item(s).`);
-
-      for (const item of items) {
-        const itemId = String(item.id);
-        try {
-          const existingUrl = getExistingLinkUrl(item);
-          const existingText = getItemColumnText(item, COL_TRAILER_LINK);
-          if (existingUrl || existingText) {
-            skipped += 1;
-            continue;
-          }
-
-          const foreignTitle = getItemColumnText(item, COL_FOREIGN_TITLE);
-          const title = (foreignTitle || item.name || "").trim();
-          if (!title) {
-            failed += 1;
-            log(`Item ${itemId}: failed (no title).`);
-            continue;
-          }
-
-          const year = getYear(item);
-          const [movies, tv] = await Promise.all([tmdbSearch(title, "movie", year), tmdbSearch(title, "tv")]);
-          const scored = [...movies.map((r: any) => ({ ...r, _media_type: "movie" as const })), ...tv.map((r: any) => ({ ...r, _media_type: "tv" as const }))]
-            .map((r: any) => {
-              const candidate = String(r?.title ?? r?.name ?? "");
-              return { ...r, _score: movieTokenSetScore(title, candidate) };
-            })
-            .sort((a: any, b: any) => Number(b?._score ?? 0) - Number(a?._score ?? 0));
-
-          let trailerUrl: string | null = null;
-          if (scored.length) {
-            const best = scored[0];
-            trailerUrl = await tmdbFindOfficialTrailer(Number(best.id), best._media_type);
-          }
-          if (!trailerUrl) {
-            trailerUrl = await youtubeFallback(title);
-          }
-
-          if (!trailerUrl) {
-            if (trailerMode === "auto_mark_na") {
-              await setLinkColumn(itemId, NA_URL, NA_TEXT);
-              noMatch += 1;
-              log(`Item ${itemId}: no match -> marked NOT AVAILABLE.`);
-            } else {
-              skipped += 1;
-              log(`Item ${itemId}: no match -> skipped (auto-only mode).`);
+          log(`Run started. Scope=${trailerScope}, mode=${trailerMode}`);
+          let scopedIds: string[] | null = null;
+          if (trailerScope === "selected") {
+            scopedIds = selectedItemIds.map((id) => String(id));
+            log(`Selected scope IDs: ${scopedIds.length}.`);
+          } else if (trailerScope === "group") {
+            if (!trailerGroupId) {
+              setStatus("Choose a trailer group first.");
+              return;
             }
-          } else {
-            await setLinkColumn(itemId, trailerUrl, "Trailer");
-            updated += 1;
-            log(`Item ${itemId}: trailer set (${trailerUrl}).`);
+            log(`Resolving group item IDs for group ${trailerGroupId}...`);
+            scopedIds = (await fetchItemIds(boardId, "group", trailerGroupId)).map((id) => String(id));
+            log(`Group scope IDs: ${scopedIds.length}.`);
           }
-        } catch (error: any) {
-          failed += 1;
-          log(`Item ${itemId}: error (${error?.message ?? "unknown"}).`);
-        } finally {
-          done += 1;
-          setProgress({ done, total: items.length, ok: updated, failed });
-          setStatus(
-            `Trailer links ${done}/${items.length} • Updated: ${updated} • Skipped: ${skipped} • No match: ${noMatch} • Failed: ${failed}`
-          );
-          await sleep(120);
-        }
-      }
 
-      setStatus(`Trailer links complete. Updated: ${updated}, Skipped: ${skipped}, No match: ${noMatch}, Failed: ${failed}.`);
-      log(`Run complete. Updated=${updated}, Skipped=${skipped}, NoMatch=${noMatch}, Failed=${failed}.`);
+          let scopedItems: MondayBoardItem[] = [];
+          if (scopedIds) {
+            if (!scopedIds.length) {
+              setStatus("No items found for selected trailer scope.");
+              return;
+            }
+            scopedItems = await fetchBoardItemsByIds(boardId, scopedIds, (done, total) => {
+              setStatus(`Fetching scoped items... ${done}/${total}`);
+            });
+          } else {
+            scopedItems = await fetchBoardItemsForDeploy(boardId, (loaded) => setStatus(`Fetching board items... ${loaded} loaded`));
+          }
+
+          const items = scopedItems.filter((item) => {
+            const existingUrl = getExistingLinkUrl(item);
+            const existingText = getItemColumnText(item, COL_TRAILER_LINK);
+            return !existingUrl && !existingText;
+          });
+          if (!items.length) {
+            setStatus("No trailer updates needed. All scoped items already have trailer links.");
+            return;
+          }
+
+          let done = 0;
+          let updated = 0;
+          let failed = 0;
+          const reviewRows: TrailerReviewRow[] = [];
+          setProgress({ done: 0, total: items.length, ok: 0, failed: 0 });
+
+          for (const item of items) {
+            const itemId = String(item.id);
+            try {
+              const foreignTitle = getItemColumnText(item, COL_FOREIGN_TITLE);
+              const searchTitle = (foreignTitle || item.name || "").trim();
+              if (!searchTitle) throw new Error("No title");
+
+              const year = getYear(item);
+              const [movies, tv] = await Promise.all([tmdbSearch(searchTitle, "movie", year), tmdbSearch(searchTitle, "tv")]);
+              const scored = [...movies.map((r: any) => ({ ...r, _media_type: "movie" as const })), ...tv.map((r: any) => ({ ...r, _media_type: "tv" as const }))]
+                .map((r: any) => {
+                  const candidate = String(r?.title ?? r?.name ?? "");
+                  return { ...r, _score: movieTokenSetScore(searchTitle, candidate) };
+                })
+                .sort((a: any, b: any) => Number(b?._score ?? 0) - Number(a?._score ?? 0));
+
+              const best = scored[0];
+              const alt1 = scored[1];
+              const alt2 = scored[2];
+              const bestTmdbUrl = best ? await tmdbFindTrailer(Number(best.id), best._media_type) : "";
+              const alt1Url = alt1 ? await tmdbFindTrailer(Number(alt1.id), alt1._media_type) : "";
+              const alt2Url = alt2 ? await tmdbFindTrailer(Number(alt2.id), alt2._media_type) : "";
+              const youtubeUrl = await youtubeFallback(searchTitle);
+              const matchTitle = best ? `${String(best?.title ?? best?.name ?? "")} (${best?._media_type})` : "No TMDB match";
+              const matchScore = Number(best?._score ?? 0);
+
+              const highConfidence = matchScore >= 90 && Boolean(bestTmdbUrl);
+              if (highConfidence) {
+                await setTrailerLinkValue(itemId, bestTmdbUrl, "Trailer");
+                updated += 1;
+                reviewRows.push({
+                  itemId,
+                  itemName: String(item.name ?? ""),
+                  searchTitle,
+                  matchedOn: matchTitle,
+                  matchScore,
+                  bestTmdbUrl,
+                  alt1Url,
+                  alt2Url,
+                  youtubeUrl,
+                  selectedChoice: "best_tmdb",
+                  status: "auto_applied",
+                  note: "Auto-applied high confidence match.",
+                });
+                log(`Item ${itemId}: auto-applied high-confidence TMDB match.`);
+              } else {
+                reviewRows.push({
+                  itemId,
+                  itemName: String(item.name ?? ""),
+                  searchTitle,
+                  matchedOn: matchTitle,
+                  matchScore,
+                  bestTmdbUrl,
+                  alt1Url,
+                  alt2Url,
+                  youtubeUrl,
+                  selectedChoice: "no_trailer",
+                  status: "pending_review",
+                  note: "Review required (low confidence or no direct trailer).",
+                });
+                log(`Item ${itemId}: added to review table (score ${matchScore}).`);
+              }
+            } catch (error: any) {
+              failed += 1;
+              reviewRows.push({
+                itemId,
+                itemName: String(item.name ?? ""),
+                searchTitle: String(item.name ?? ""),
+                matchedOn: "-",
+                matchScore: 0,
+                bestTmdbUrl: "",
+                alt1Url: "",
+                alt2Url: "",
+                youtubeUrl: "",
+                selectedChoice: "no_trailer",
+                status: "failed",
+                note: error?.message ?? "Failed while searching",
+              });
+              log(`Item ${itemId}: failed (${error?.message ?? "unknown"}).`);
+            } finally {
+              done += 1;
+              setProgress({ done, total: items.length, ok: updated, failed });
+              setStatus(`Trailer links ${done}/${items.length} • Auto-applied: ${updated} • Failed: ${failed}`);
+            }
+          }
+
+          setTrailerReviewRows(reviewRows);
+          setStatus(`Trailer scan complete. Auto-applied: ${updated}. Review rows: ${reviewRows.filter((r) => r.status === "pending_review").length}.`);
+          log(`Run complete. Auto-applied=${updated}, review=${reviewRows.filter((r) => r.status === "pending_review").length}, failed=${failed}.`);
         })(),
         TRAILER_RUN_TIMEOUT_MS,
-        "Trailer links timed out. Please narrow scope (Selected/Group) and try again."
+        "Trailer links timed out. Please narrow scope and try again."
       );
     } catch (error: any) {
       setStatus(`Trailer links failed: ${error?.message ?? String(error)}`);
-      log(`Run failed: ${error?.message ?? String(error)}`);
     } finally {
       setBusy(false);
     }
@@ -2896,9 +3000,17 @@ export default function App() {
               )}
               <span style={{ opacity: 0.7 }}>{trailerScopeHint}</span>
             </div>
-            <button disabled={busy} onClick={runTrailerLinks}>
-              Run Trailer links
-            </button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button disabled={busy} onClick={runTrailerLinks}>
+                Run Trailer links
+              </button>
+              <button disabled={busy || trailerScope !== "group" || !trailerGroupId} onClick={removeTrailersForSelectedGroup}>
+                Remove trailers for selected group
+              </button>
+              <button disabled={busy || trailerReviewRows.length === 0} onClick={applyTrailerReviewSelections}>
+                Apply selected choices
+              </button>
+            </div>
             <div style={{ marginTop: 10, fontSize: 13 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <span>Status: {busy && status.toLowerCase().includes("trailer links") ? "Working" : "Idle"}</span>
@@ -2948,6 +3060,105 @@ export default function App() {
                 </div>
               </div>
             </div>
+            {trailerReviewRows.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <h4 style={{ margin: "0 0 8px 0" }}>Trailer Review Table</h4>
+                <div style={{ maxHeight: 360, overflow: "auto", border: "1px solid #ddd" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Item
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Searched title
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Matched on
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Score
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Best
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Alt 1
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Alt 2
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          YouTube
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          No trailer
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Status
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trailerReviewRows.map((row) => (
+                        <tr key={`trailer-review-${row.itemId}`}>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            {row.itemName} ({row.itemId})
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.searchTitle}</td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchedOn}</td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchScore}</td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            <input
+                              type="checkbox"
+                              disabled={busy || !row.bestTmdbUrl}
+                              checked={row.selectedChoice === "best_tmdb"}
+                              onChange={() => setTrailerRowChoice(row.itemId, "best_tmdb")}
+                            />
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            <input
+                              type="checkbox"
+                              disabled={busy || !row.alt1Url}
+                              checked={row.selectedChoice === "alt_1"}
+                              onChange={() => setTrailerRowChoice(row.itemId, "alt_1")}
+                            />
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            <input
+                              type="checkbox"
+                              disabled={busy || !row.alt2Url}
+                              checked={row.selectedChoice === "alt_2"}
+                              onChange={() => setTrailerRowChoice(row.itemId, "alt_2")}
+                            />
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            <input
+                              type="checkbox"
+                              disabled={busy || !row.youtubeUrl}
+                              checked={row.selectedChoice === "youtube"}
+                              onChange={() => setTrailerRowChoice(row.itemId, "youtube")}
+                            />
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            <input
+                              type="checkbox"
+                              disabled={busy}
+                              checked={row.selectedChoice === "no_trailer"}
+                              onChange={() => setTrailerRowChoice(row.itemId, "no_trailer")}
+                            />
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            {row.status}
+                            {row.note ? ` - ${row.note}` : ""}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
