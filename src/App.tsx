@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.4";
+const APP_VERSION = "1.2.5";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -133,6 +133,8 @@ type TrailerReviewRow = {
   alt2Label: string;
   youtubeUrl: string;
   youtubeLabel: string;
+  imdbUrl: string;
+  imdbLabel: string;
   selectedChoice: TrailerChoice;
   status: "auto_applied" | "pending_review" | "applied" | "no_trailer" | "failed";
   note: string;
@@ -2640,19 +2642,30 @@ export default function App() {
     for (const row of trailerReviewRows) {
       try {
         let url = "";
+        let text = "Trailer";
         if (row.selectedChoice === "best_tmdb") url = row.bestTmdbUrl;
         if (row.selectedChoice === "alt_1") url = row.alt1Url;
         if (row.selectedChoice === "alt_2") url = row.alt2Url;
         if (row.selectedChoice === "youtube") url = row.youtubeUrl;
 
         if (row.selectedChoice === "no_trailer" || !url) {
+          url = row.imdbUrl;
+          text = "IMDb";
+        }
+
+        if (url) {
+          await setTrailerLinkValue(row.itemId, url, text);
+          ok += 1;
           setTrailerReviewRows((prev) =>
-            prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "no_trailer", note: "No trailer selected." } : x))
+            prev.map((x) =>
+              x.itemId === row.itemId
+                ? { ...x, status: row.selectedChoice === "no_trailer" || text === "IMDb" ? "no_trailer" : "applied", note: `Applied ${text} link.` }
+                : x
+            )
           );
         } else {
-          await setTrailerLinkValue(row.itemId, url, "Trailer");
-          setTrailerReviewRows((prev) => prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "applied", note: "Applied." } : x)));
-          ok += 1;
+          setTrailerReviewRows((prev) => prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "failed", note: "No link available." } : x)));
+          failed += 1;
         }
       } catch (error: any) {
         failed += 1;
@@ -2854,11 +2867,18 @@ export default function App() {
               const youtube = await youtubeFallback(searchTitle);
               const youtubeUrl = youtube.url;
               const youtubeLabel = youtube.label;
-              const bestLabel = best ? `${String(best?.title ?? best?.name ?? "")} (${best?._media_type})` : "";
+              const bestTitle = String(best?.title ?? best?.name ?? "").trim();
+              const bestOriginal = String(best?.original_title ?? best?.original_name ?? "").trim();
+              const translatedTitle = bestTitle || foreignTitle || "-";
+              const bestLabel = best ? `${bestTitle || "-"} (${best?._media_type})` : "";
               const alt1Label = alt1 ? `${String(alt1?.title ?? alt1?.name ?? "")} (${alt1?._media_type})` : "";
               const alt2Label = alt2 ? `${String(alt2?.title ?? alt2?.name ?? "")} (${alt2?._media_type})` : "";
               const matchTitle = best ? `${String(best?.title ?? best?.name ?? "")} (${best?._media_type})` : "No TMDB match";
               const matchScore = Number(best?._score ?? 0);
+              const imdbUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(`${searchTitle} ${yearText || ""}`.trim())}`;
+              const imdbLabel = bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search";
+
+              const hasAnyTrailerOption = Boolean(bestTmdbUrl || alt1Url || alt2Url || youtubeUrl);
 
               const highConfidence = matchScore >= 90 && Boolean(bestTmdbUrl);
               if (highConfidence) {
@@ -2868,7 +2888,7 @@ export default function App() {
                   itemId,
                   itemName: String(item.name ?? ""),
                   searchTitle,
-                  translatedTitle: foreignTitle || "-",
+                  translatedTitle,
                   yearText: yearText || "-",
                   matchedOn: matchTitle,
                   matchScore,
@@ -2880,17 +2900,21 @@ export default function App() {
                   alt2Label,
                   youtubeUrl,
                   youtubeLabel,
+                  imdbUrl,
+                  imdbLabel,
                   selectedChoice: "best_tmdb",
                   status: "auto_applied",
                   note: "Auto-applied high confidence match.",
                 });
                 log(`Item ${itemId}: auto-applied high-confidence TMDB match.`);
-              } else {
+              } else if (!hasAnyTrailerOption) {
+                await setTrailerLinkValue(itemId, imdbUrl, "IMDb");
+                updated += 1;
                 reviewRows.push({
                   itemId,
                   itemName: String(item.name ?? ""),
                   searchTitle,
-                  translatedTitle: foreignTitle || "-",
+                  translatedTitle,
                   yearText: yearText || "-",
                   matchedOn: matchTitle,
                   matchScore,
@@ -2902,6 +2926,32 @@ export default function App() {
                   alt2Label,
                   youtubeUrl,
                   youtubeLabel,
+                  imdbUrl,
+                  imdbLabel,
+                  selectedChoice: "no_trailer",
+                  status: "auto_applied",
+                  note: "No trailer found. IMDb link applied.",
+                });
+                log(`Item ${itemId}: no trailer options -> IMDb link applied.`);
+              } else {
+                reviewRows.push({
+                  itemId,
+                  itemName: String(item.name ?? ""),
+                  searchTitle,
+                  translatedTitle,
+                  yearText: yearText || "-",
+                  matchedOn: matchTitle,
+                  matchScore,
+                  bestTmdbUrl,
+                  bestLabel,
+                  alt1Url,
+                  alt1Label,
+                  alt2Url,
+                  alt2Label,
+                  youtubeUrl,
+                  youtubeLabel,
+                  imdbUrl,
+                  imdbLabel,
                   selectedChoice: "no_trailer",
                   status: "pending_review",
                   note: "Review required (low confidence or no direct trailer).",
@@ -2926,6 +2976,8 @@ export default function App() {
                 alt2Label: "",
                 youtubeUrl: "",
                 youtubeLabel: "",
+                imdbUrl: `https://www.imdb.com/find/?q=${encodeURIComponent(String(item.name ?? ""))}`,
+                imdbLabel: "IMDb search",
                 selectedChoice: "no_trailer",
                 status: "failed",
                 note: error?.message ?? "Failed while searching",
@@ -3198,12 +3250,15 @@ export default function App() {
                             </label>
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <input
-                              type="checkbox"
-                              disabled={busy}
-                              checked={row.selectedChoice === "no_trailer"}
-                              onChange={() => setTrailerRowChoice(row.itemId, "no_trailer")}
-                            />
+                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                              <input
+                                type="checkbox"
+                                disabled={busy}
+                                checked={row.selectedChoice === "no_trailer"}
+                                onChange={() => setTrailerRowChoice(row.itemId, "no_trailer")}
+                              />
+                              <span>{row.imdbLabel || "IMDb"}</span>
+                            </label>
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
                             {row.status}
