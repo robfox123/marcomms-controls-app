@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.9";
+const APP_VERSION = "1.2.10";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -138,6 +138,9 @@ type TrailerReviewRow = {
   youtubeLabel: string;
   imdbUrl: string;
   imdbLabel: string;
+  elcinemaUrl: string;
+  elcinemaLabel: string;
+  lookupSource: string;
   posterUrl: string;
   confirmImdb: boolean;
   confirmImage: boolean;
@@ -919,6 +922,20 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = EXTERNAL_FETCH_TIME
     return await res.json();
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchTextWithTimeout(url: string, timeoutMs = EXTERNAL_FETCH_TIMEOUT_MS): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return "";
+    return await res.text();
+  } catch {
+    return "";
   } finally {
     clearTimeout(timer);
   }
@@ -2895,6 +2912,24 @@ export default function App() {
         breakdown: `IMDb fallback: title=${best.titleScore}, exact=${best.exactBoost}, year=${best.yearBoost}, media=${best.mediaBoost}, total=${best.total}`,
       };
     };
+    const elcinemaFallback = async (
+      title: string,
+      year: number | undefined
+    ): Promise<{ url: string; label: string; source: string }> => {
+      const q = `${String(title || "").trim()} ${year || ""}`.trim();
+      const searchUrl = `https://elcinema.com/en/search/?q=${encodeURIComponent(q)}`;
+      const proxyUrl = `https://r.jina.ai/http://elcinema.com/en/search/?q=${encodeURIComponent(q)}`;
+      const text = await fetchTextWithTimeout(proxyUrl);
+      if (!text) return { url: searchUrl, label: "Elcinema search", source: "Elcinema search fallback" };
+
+      const absMatch = text.match(/https?:\/\/(?:www\.)?elcinema\.com\/en\/work\/\d+\/?/i);
+      if (absMatch?.[0]) return { url: absMatch[0], label: "Elcinema title", source: "Elcinema work match" };
+
+      const relMatch = text.match(/\/en\/work\/\d+\/?/i);
+      if (relMatch?.[0]) return { url: `https://elcinema.com${relMatch[0]}`, label: "Elcinema title", source: "Elcinema work match" };
+
+      return { url: searchUrl, label: "Elcinema search", source: "Elcinema search fallback" };
+    };
 
     try {
       await withTimeout(
@@ -3019,14 +3054,23 @@ export default function App() {
                 : "No TMDB candidate scored.";
               const extMeta = best ? await tmdbExternalMeta(Number(best.id), best._media_type) : null;
               const imdbSuggest = await imdbSuggestFallback(searchTitle, year, preferredMedia);
+              const elcinema = await elcinemaFallback(searchTitle, year);
               const imdbFallbackTitle = bestTitle || searchTitle;
               const imdbFallbackYear = bestYear || year || 0;
-              const imdbUrl =
-                extMeta?.imdbUrl ||
-                imdbSuggest.url ||
-                `https://www.imdb.com/find/?q=${encodeURIComponent(`${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""}`.trim())}`;
-              const imdbLabel =
-                extMeta?.imdbLabel || imdbSuggest.label || (bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search");
+              const imdbFindUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(`${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""}`.trim())}`;
+              const preferredReferenceUrl = extMeta?.imdbUrl || imdbSuggest.url || elcinema.url || imdbFindUrl;
+              const preferredReferenceLabel =
+                extMeta?.imdbLabel ||
+                imdbSuggest.label ||
+                elcinema.label ||
+                (bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search");
+              const lookupSource = extMeta?.imdbUrl
+                ? "TMDB external IMDb ID"
+                : imdbSuggest.url
+                  ? "IMDb suggest match"
+                  : elcinema.source
+                    ? elcinema.source
+                    : "IMDb search fallback";
               const posterUrl = extMeta?.posterUrl || imdbSuggest.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : "");
               const translatedTitle = extMeta?.translatedTitle || bestTitle || imdbSuggest.matchedTitle || foreignTitle || "-";
               if (!best && imdbSuggest.matchedTitle) {
@@ -3052,8 +3096,11 @@ export default function App() {
                 alt2Label,
                 youtubeUrl,
                 youtubeLabel,
-                imdbUrl,
-                imdbLabel,
+                imdbUrl: preferredReferenceUrl,
+                imdbLabel: preferredReferenceLabel,
+                elcinemaUrl: elcinema.url,
+                elcinemaLabel: elcinema.label,
+                lookupSource,
                 posterUrl,
                 confirmImdb: true,
                 confirmImage: false,
@@ -3083,6 +3130,9 @@ export default function App() {
                 youtubeLabel: "",
                 imdbUrl: `https://www.imdb.com/find/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 imdbLabel: "IMDb search",
+                elcinemaUrl: `https://elcinema.com/en/search/?q=${encodeURIComponent(String(item.name ?? ""))}`,
+                elcinemaLabel: "Elcinema search",
+                lookupSource: "Lookup error fallback",
                 posterUrl: "",
                 confirmImdb: true,
                 confirmImage: false,
@@ -3289,6 +3339,12 @@ export default function App() {
                           Confirm IMDb
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Elcinema
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Lookup source
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Matched on
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
@@ -3351,6 +3407,16 @@ export default function App() {
                               }
                             />
                           </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            {row.elcinemaUrl ? (
+                              <a href={row.elcinemaUrl} target="_blank" rel="noreferrer">
+                                {row.elcinemaLabel || "Elcinema"}
+                              </a>
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.lookupSource || "-"}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchedOn}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchScore}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9", maxWidth: 280 }}>{row.matchBreakdown}</td>
