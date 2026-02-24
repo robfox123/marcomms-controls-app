@@ -138,6 +138,7 @@ type TrailerReviewRow = {
   imdbUrl: string;
   imdbLabel: string;
   posterUrl: string;
+  confirmImdb: boolean;
   confirmImage: boolean;
   selectedChoice: TrailerChoice;
   status: "auto_applied" | "pending_review" | "applied" | "no_trailer" | "failed";
@@ -2683,43 +2684,34 @@ export default function App() {
 
     for (const row of trailerReviewRows) {
       try {
-        let url = "";
-        let text = "Trailer";
-        if (row.selectedChoice === "best_tmdb") url = row.bestTmdbUrl;
-        if (row.selectedChoice === "alt_1") url = row.alt1Url;
-        if (row.selectedChoice === "alt_2") url = row.alt2Url;
-        if (row.selectedChoice === "youtube") url = row.youtubeUrl;
+        let noteParts: string[] = [];
+        let appliedAny = false;
 
-        if (row.selectedChoice === "no_trailer" || !url) {
-          url = row.imdbUrl;
-          text = "IMDb";
+        if (row.confirmImdb && row.imdbUrl) {
+          await setLinkColumnValue(row.itemId, COL_IMDB_LINK, row.imdbUrl, "IMDb");
+          appliedAny = true;
+          noteParts.push("IMDb link applied.");
         }
 
-        if (url) {
-          await setTrailerLinkValue(row.itemId, url, text);
-          if (row.imdbUrl) {
-            await setLinkColumnValue(row.itemId, COL_IMDB_LINK, row.imdbUrl, "IMDb");
+        if (row.confirmImage && row.posterUrl) {
+          try {
+            await setFileColumnFromUrl(row.itemId, row.posterUrl);
+            appliedAny = true;
+            noteParts.push("Poster image sent to file column.");
+          } catch (fileErr: any) {
+            noteParts.push(`Poster write failed: ${fileErr?.message ?? "unsupported by API context"}.`);
           }
-          let note = `Applied ${text} link.`;
-          if (row.confirmImage && row.posterUrl) {
-            try {
-              await setFileColumnFromUrl(row.itemId, row.posterUrl);
-              note = `${note} Image sent to file column.`;
-            } catch (fileErr: any) {
-              note = `${note} Image file write failed: ${fileErr?.message ?? "unsupported by API context"}.`;
-            }
-          }
+        }
+
+        if (appliedAny) {
           ok += 1;
           setTrailerReviewRows((prev) =>
-            prev.map((x) =>
-              x.itemId === row.itemId
-                ? { ...x, status: row.selectedChoice === "no_trailer" || text === "IMDb" ? "no_trailer" : "applied", note }
-                : x
-            )
+            prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "applied", note: noteParts.join(" ") || "Applied." } : x))
           );
         } else {
-          setTrailerReviewRows((prev) => prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "failed", note: "No link available." } : x)));
-          failed += 1;
+          setTrailerReviewRows((prev) =>
+            prev.map((x) => (x.itemId === row.itemId ? { ...x, status: "no_trailer", note: "Nothing selected to apply." } : x))
+          );
         }
       } catch (error: any) {
         failed += 1;
@@ -2950,90 +2942,32 @@ export default function App() {
               const posterUrl = extMeta?.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w154${String(best.poster_path)}` : "");
               const translatedTitle = extMeta?.translatedTitle || bestTitle || foreignTitle || "-";
 
-              const hasAnyTrailerOption = Boolean(bestTmdbUrl || alt1Url || alt2Url || youtubeUrl);
-
-              const highConfidence = matchScore >= 90 && Boolean(bestTmdbUrl);
-              if (highConfidence) {
-                await setTrailerLinkValue(itemId, bestTmdbUrl, "Trailer");
-                updated += 1;
-                reviewRows.push({
-                  itemId,
-                  itemName: String(item.name ?? ""),
-                  searchTitle,
-                  translatedTitle,
-                  yearText: yearText || "-",
-                  matchedOn: matchTitle,
-                  matchScore,
-                  bestTmdbUrl,
-                  bestLabel,
-                  alt1Url,
-                  alt1Label,
-                  alt2Url,
-                  alt2Label,
-                  youtubeUrl,
-                  youtubeLabel,
-                  imdbUrl,
-                  imdbLabel,
-                  posterUrl,
-                  confirmImage: false,
-                  selectedChoice: "best_tmdb",
-                  status: "auto_applied",
-                  note: "Auto-applied high confidence match.",
-                });
-                log(`Item ${itemId}: auto-applied high-confidence TMDB match.`);
-              } else if (!hasAnyTrailerOption) {
-                await setTrailerLinkValue(itemId, imdbUrl, "IMDb");
-                updated += 1;
-                reviewRows.push({
-                  itemId,
-                  itemName: String(item.name ?? ""),
-                  searchTitle,
-                  translatedTitle,
-                  yearText: yearText || "-",
-                  matchedOn: matchTitle,
-                  matchScore,
-                  bestTmdbUrl,
-                  bestLabel,
-                  alt1Url,
-                  alt1Label,
-                  alt2Url,
-                  alt2Label,
-                  youtubeUrl,
-                  youtubeLabel,
-                  imdbUrl,
-                  imdbLabel,
-                  posterUrl,
-                  confirmImage: false,
-                  selectedChoice: "no_trailer",
-                  status: "auto_applied",
-                  note: "No trailer found. IMDb link applied.",
-                });
-                log(`Item ${itemId}: no trailer options -> IMDb link applied.`);
-              } else {
-                reviewRows.push({
-                  itemId,
-                  itemName: String(item.name ?? ""),
-                  searchTitle,
-                  translatedTitle,
-                  yearText: yearText || "-",
-                  matchedOn: matchTitle,
-                  matchScore,
-                  bestTmdbUrl,
-                  bestLabel,
-                  alt1Url,
-                  alt1Label,
-                  alt2Url,
-                  alt2Label,
-                  youtubeUrl,
-                  youtubeLabel,
-                  imdbUrl,
-                  imdbLabel,
-                  selectedChoice: "no_trailer",
-                  status: "pending_review",
-                  note: "Review required (low confidence or no direct trailer).",
-                });
-                log(`Item ${itemId}: added to review table (score ${matchScore}).`);
-              }
+              reviewRows.push({
+                itemId,
+                itemName: String(item.name ?? ""),
+                searchTitle,
+                translatedTitle,
+                yearText: yearText || "-",
+                matchedOn: matchTitle,
+                matchScore,
+                bestTmdbUrl,
+                bestLabel,
+                alt1Url,
+                alt1Label,
+                alt2Url,
+                alt2Label,
+                youtubeUrl,
+                youtubeLabel,
+                imdbUrl,
+                imdbLabel,
+                posterUrl,
+                confirmImdb: true,
+                confirmImage: false,
+                selectedChoice: "no_trailer",
+                status: "pending_review",
+                note: "Review IMDb + image and apply.",
+              });
+              log(`Item ${itemId}: added to IMDb/image review table (score ${matchScore}).`);
             } catch (error: any) {
               failed += 1;
               reviewRows.push({
@@ -3055,6 +2989,7 @@ export default function App() {
                 imdbUrl: `https://www.imdb.com/find/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 imdbLabel: "IMDb search",
                 posterUrl: "",
+                confirmImdb: true,
                 confirmImage: false,
                 selectedChoice: "no_trailer",
                 status: "failed",
@@ -3064,13 +2999,13 @@ export default function App() {
             } finally {
               done += 1;
               setProgress({ done, total: runItems.length, ok: updated, failed });
-              setStatus(`Trailer links ${done}/${runItems.length} • Auto-applied: ${updated} • Failed: ${failed}`);
+              setStatus(`Trailer links ${done}/${runItems.length} • Reviewed: ${reviewRows.length} • Failed: ${failed}`);
             }
           }
 
           setTrailerReviewRows(reviewRows);
-          setStatus(`Trailer scan complete. Auto-applied: ${updated}. Review rows: ${reviewRows.filter((r) => r.status === "pending_review").length}.`);
-          log(`Run complete. Auto-applied=${updated}, review=${reviewRows.filter((r) => r.status === "pending_review").length}, failed=${failed}.`);
+          setStatus(`IMDb/image scan complete. Review rows: ${reviewRows.length}.`);
+          log(`Run complete. review=${reviewRows.length}, failed=${failed}.`);
         })(),
         TRAILER_RUN_TIMEOUT_MS,
         "Trailer links timed out. Please narrow scope and try again."
@@ -3253,25 +3188,16 @@ export default function App() {
                           Confirm image
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          IMDb link
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
+                          Confirm IMDb
+                        </th>
+                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Matched on
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Score
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Best
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Alt 1
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Alt 2
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          YouTube
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          No trailer
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Status
@@ -3306,63 +3232,29 @@ export default function App() {
                               }
                             />
                           </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            {row.imdbUrl ? (
+                              <a href={row.imdbUrl} target="_blank" rel="noreferrer">
+                                {row.imdbLabel || "IMDb"}
+                              </a>
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                            <input
+                              type="checkbox"
+                              disabled={busy || !row.imdbUrl}
+                              checked={row.confirmImdb}
+                              onChange={(e) =>
+                                setTrailerReviewRows((prev) =>
+                                  prev.map((x) => (x.itemId === row.itemId ? { ...x, confirmImdb: e.target.checked } : x))
+                                )
+                              }
+                            />
+                          </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchedOn}</td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchScore}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                              <input
-                                type="checkbox"
-                                disabled={busy || !row.bestTmdbUrl}
-                                checked={row.selectedChoice === "best_tmdb"}
-                                onChange={() => setTrailerRowChoice(row.itemId, "best_tmdb")}
-                              />
-                              <span>{row.bestLabel || "-"}</span>
-                            </label>
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                              <input
-                                type="checkbox"
-                                disabled={busy || !row.alt1Url}
-                                checked={row.selectedChoice === "alt_1"}
-                                onChange={() => setTrailerRowChoice(row.itemId, "alt_1")}
-                              />
-                              <span>{row.alt1Label || "-"}</span>
-                            </label>
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                              <input
-                                type="checkbox"
-                                disabled={busy || !row.alt2Url}
-                                checked={row.selectedChoice === "alt_2"}
-                                onChange={() => setTrailerRowChoice(row.itemId, "alt_2")}
-                              />
-                              <span>{row.alt2Label || "-"}</span>
-                            </label>
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                              <input
-                                type="checkbox"
-                                disabled={busy || !row.youtubeUrl}
-                                checked={row.selectedChoice === "youtube"}
-                                onChange={() => setTrailerRowChoice(row.itemId, "youtube")}
-                              />
-                              <span>{row.youtubeLabel || "-"}</span>
-                            </label>
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                              <input
-                                type="checkbox"
-                                disabled={busy}
-                                checked={row.selectedChoice === "no_trailer"}
-                                onChange={() => setTrailerRowChoice(row.itemId, "no_trailer")}
-                              />
-                              <span>{row.imdbLabel || "IMDb"}</span>
-                            </label>
-                          </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
                             {row.status}
                             {row.note ? ` - ${row.note}` : ""}
