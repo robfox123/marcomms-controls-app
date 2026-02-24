@@ -6,12 +6,14 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.13";
+const APP_VERSION = "1.2.14";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
 const UPDATE_RETRY_BACKOFF_MS = 250;
-const DEPLOY_CONCURRENCY = 6;
+const DEPLOY_CONCURRENCY = 3;
+const MONDAY_RATE_RETRY_LIMIT = 6;
+const MONDAY_RATE_RETRY_BACKOFF_MS = 800;
 const FETCH_CURSOR_MAX_PAGES = 80;
 const EXTERNAL_FETCH_TIMEOUT_MS = 12000;
 const MONDAY_API_TIMEOUT_MS = 25000;
@@ -34,6 +36,7 @@ const COL_FLAG_L3 = "boolean_mkrr1hwr";
 const COL_FLAG_THALES = "boolean_mkrrpfvg";
 const TMDB_API_KEY = "15565da9094b23c59adcd5f62435786d";
 const YOUTUBE_API_KEY = "AIzaSyCRKi5aWBsGMujtb0u-HjtuXHrzHC7_txA";
+const LOOKUP_WORKER_URL = "https://marcomms-lookup-api.rob-fox.workers.dev";
 
 type Scope = "selected" | "group" | "board";
 type TrailerMode = "auto_mark_na" | "auto_only";
@@ -328,6 +331,28 @@ function formatApiError(error: any, fallback = "Unknown API error"): string {
   }
 
   return joined;
+}
+
+function isRateLimitError(error: any): boolean {
+  const text = formatApiError(error, "").toLowerCase();
+  return text.includes("429") || text.includes("rate limit") || text.includes("too many requests") || text.includes("exceeded retry limit");
+}
+
+async function mondayApiWithRetry(query: string, options: any): Promise<any> {
+  let lastError: any = null;
+  for (let attempt = 0; attempt <= MONDAY_RATE_RETRY_LIMIT; attempt += 1) {
+    try {
+      const res = await monday.api(query, options);
+      const gqlErrors = res?.errors ?? [];
+      if (Array.isArray(gqlErrors) && gqlErrors.length) throw { errors: gqlErrors };
+      return res;
+    } catch (error: any) {
+      lastError = error;
+      if (!isRateLimitError(error) || attempt >= MONDAY_RATE_RETRY_LIMIT) throw error;
+      await sleep(MONDAY_RATE_RETRY_BACKOFF_MS * (attempt + 1));
+    }
+  }
+  throw lastError ?? new Error("Monday API request failed.");
 }
 
 async function fetchGroups(boardId: number): Promise<Group[]> {
@@ -2573,7 +2598,7 @@ export default function App() {
             for (const update of row.updates) {
               valuesByColumn[update.columnId] = update.value;
             }
-            await monday.api(mutation, {
+            await mondayApiWithRetry(mutation, {
               variables: {
                 boardId,
                 itemId: row.itemId,
@@ -2615,7 +2640,7 @@ export default function App() {
         }
       }
     `;
-    await monday.api(mutation, {
+    await mondayApiWithRetry(mutation, {
       variables: {
         boardId,
         itemId,
@@ -2634,7 +2659,7 @@ export default function App() {
         }
       }
     `;
-    await monday.api(mutation, {
+    await mondayApiWithRetry(mutation, {
       variables: {
         boardId,
         itemId,
@@ -2653,7 +2678,7 @@ export default function App() {
         }
       }
     `;
-    await monday.api(mutation, {
+    await mondayApiWithRetry(mutation, {
       variables: {
         boardId,
         itemId,
@@ -2672,7 +2697,7 @@ export default function App() {
         }
       }
     `;
-    await monday.api(mutation, {
+    await mondayApiWithRetry(mutation, {
       variables: {
         boardId,
         itemId,
@@ -2744,6 +2769,7 @@ export default function App() {
       } finally {
         done += 1;
         setProgress({ done, total: trailerReviewRows.length, ok, failed });
+        await sleep(120);
       }
     }
     setStatus(`Trailer review apply complete. Applied: ${ok}, Failed: ${failed}.`);
@@ -2889,93 +2915,121 @@ export default function App() {
       }
       return Array.from(vars).filter(Boolean);
     };
-    const imdbSuggestFallback = async (
+    const imdbWorkerFallback = async (
       title: string,
       year: number | undefined,
       preferredMedia: "movie" | "tv" | "any"
-    ): Promise<{ url: string; label: string; posterUrl: string; matchedTitle: string; score: number; breakdown: string; resultCount: number; reason: string }> => {
+    ): Promise<{
+      url: string;
+      label: string;
+      posterUrl: string;
+      matchedTitle: string;
+      translatedTitle: string;
+      score: number;
+      breakdown: string;
+      attempts: number;
+      reason: string;
+      matchedType: string;
+      matchedYear: number;
+      variant: string;
+    }> => {
       const variants = buildSearchVariants(title, year);
-      if (!variants.length)
-        return { url: "", label: "", posterUrl: "", matchedTitle: "", score: 0, breakdown: "IMDb suggest: no title.", resultCount: 0, reason: "empty_title" };
-
-      let bestHit: any = null;
-      let totalRows = 0;
-      for (const clean of variants) {
-        const first = clean[0]?.toLowerCase();
-        if (!first) continue;
-        const url = `https://v3.sg.media-imdb.com/suggestion/${encodeURIComponent(first)}/${encodeURIComponent(clean)}.json`;
-        const json = await fetchJsonWithTimeout(url);
-        const rows = Array.isArray(json?.d) ? json.d : [];
-        totalRows += rows.length;
-        if (!rows.length) continue;
-        const searchNorm = normalizeTitleAscii(clean);
-        const scored = rows
-          .map((r: any) => {
-            const id = String(r?.id ?? "");
-            const matchedTitle = String(r?.l ?? "").trim();
-            const typeRaw = String(r?.q ?? "").toLowerCase();
-            const type = typeRaw.includes("tv") || typeRaw.includes("series") ? "tv" : "movie";
-            const y = Number(r?.y ?? 0) || 0;
-            const titleScore = movieTokenSetScore(clean, matchedTitle);
-            const candidateNorm = normalizeTitleAscii(matchedTitle);
-            const exactBoost = candidateNorm && candidateNorm === searchNorm ? 30 : candidateNorm && searchNorm.includes(candidateNorm) ? 8 : 0;
-            const yearBoost = year && y ? (year === y ? 22 : Math.max(-14, 10 - Math.abs(year - y) * 4)) : 0;
-            const mediaBoost = preferredMedia === "movie" ? (type === "movie" ? 12 : -12) : preferredMedia === "tv" ? (type === "tv" ? 12 : -12) : 0;
-            const total = titleScore + exactBoost + yearBoost + mediaBoost;
-            const imageUrl = String(r?.i?.imageUrl ?? "").trim();
-            return { id, matchedTitle, y, type, imageUrl, titleScore, exactBoost, yearBoost, mediaBoost, total, query: clean };
-          })
-          .sort((a: any, b: any) => b.total - a.total);
-        const top = scored[0];
-        if (!top?.id?.startsWith("tt")) continue;
-        if (!bestHit || Number(top.total) > Number(bestHit.total)) bestHit = top;
-      }
-
-      if (!bestHit)
+      if (!variants.length) {
         return {
           url: "",
           label: "",
           posterUrl: "",
           matchedTitle: "",
+          translatedTitle: "",
           score: 0,
-          breakdown: "IMDb suggest: no title-id result across variants.",
-          resultCount: totalRows,
-          reason: "no_title_id",
+          breakdown: "OMDb worker: no title.",
+          attempts: 0,
+          reason: "empty_title",
+          matchedType: "",
+          matchedYear: 0,
+          variant: "",
         };
-      return {
-        url: `https://www.imdb.com/title/${bestHit.id}/`,
-        label: `IMDb (${bestHit.matchedTitle}${bestHit.y ? ` ${bestHit.y}` : ""})`,
-        posterUrl: bestHit.imageUrl || "",
-        matchedTitle: bestHit.matchedTitle,
-        score: Number(bestHit.total || 0),
-        breakdown: `IMDb suggest(${bestHit.query}): title=${bestHit.titleScore}, exact=${bestHit.exactBoost}, year=${bestHit.yearBoost}, media=${bestHit.mediaBoost}, total=${bestHit.total}`,
-        resultCount: totalRows,
-        reason: "ok",
-      };
-    };
-    const imdbFindDirectFallback = async (
-      title: string,
-      year: number | undefined
-    ): Promise<{ url: string; label: string; source: string; reason: string }> => {
-      const variants = buildSearchVariants(title, year);
-      if (!variants.length) return { url: "", label: "IMDb search", source: "IMDb find fallback (empty)", reason: "empty_title" };
-      let gotAnyResponse = false;
-      for (const base of variants) {
-        const q = `${base} ${year || ""}`.trim();
-        const proxyUrl = `https://r.jina.ai/http://www.imdb.com/find/?q=${encodeURIComponent(q)}`;
-        const text = await fetchTextWithTimeout(proxyUrl);
-        if (!text) continue;
-        gotAnyResponse = true;
-        const titleMatch = text.match(/https?:\/\/(?:www\.)?imdb\.com\/title\/tt\d+\/?/i);
-        if (titleMatch?.[0]) {
-          return { url: titleMatch[0], label: "IMDb title", source: "IMDb find first-title match", reason: `abs_title_match:${base}` };
-        }
-        const relMatch = text.match(/\/title\/tt\d+\/?/i);
-        if (relMatch?.[0]) {
-          return { url: `https://www.imdb.com${relMatch[0]}`, label: "IMDb title", source: "IMDb find first-title match", reason: `rel_title_match:${base}` };
+      }
+
+      const typeHints = preferredMedia === "movie" ? ["movie", ""] : preferredMedia === "tv" ? ["series", ""] : ["movie", "series", ""];
+      let bestHit: any = null;
+      let attempts = 0;
+      let hadResponse = false;
+
+      for (const variant of variants) {
+        for (const typeHint of typeHints) {
+          attempts += 1;
+          const url = qs(`${LOOKUP_WORKER_URL}/lookup`, { title: variant, year, type: typeHint || undefined });
+          const json = await fetchJsonWithTimeout(url);
+          if (!json || json?.ok !== true) continue;
+          hadResponse = true;
+
+          const omdb = json?.omdb ?? {};
+          if (String(omdb?.Response ?? "").toLowerCase() !== "true") continue;
+
+          const imdbId = String(omdb?.imdbID ?? "").trim();
+          const matchedTitle = String(omdb?.Title ?? "").trim();
+          const matchedYear = Number(String(omdb?.Year ?? "").match(/\b(19|20)\d{2}\b/)?.[0] ?? 0) || 0;
+          const omdbTypeRaw = String(omdb?.Type ?? "").toLowerCase().trim();
+          const omdbType = omdbTypeRaw === "series" ? "tv" : omdbTypeRaw === "movie" ? "movie" : "";
+          const poster = String(omdb?.Poster ?? "").trim();
+          const titleScore = movieTokenSetScore(variant, matchedTitle);
+          const searchNorm = normalizeTitleAscii(variant);
+          const candidateNorm = normalizeTitleAscii(matchedTitle);
+          const exactBoost = candidateNorm && candidateNorm === searchNorm ? 30 : candidateNorm && searchNorm.includes(candidateNorm) ? 8 : 0;
+          const yearBoost = year && matchedYear ? (year === matchedYear ? 22 : Math.max(-14, 10 - Math.abs(year - matchedYear) * 4)) : 0;
+          const mediaBoost = preferredMedia === "movie" ? (omdbType === "movie" ? 12 : -12) : preferredMedia === "tv" ? (omdbType === "tv" ? 12 : -12) : 0;
+          const total = titleScore + exactBoost + yearBoost + mediaBoost;
+          const row = {
+            imdbId,
+            matchedTitle,
+            translatedTitle: matchedTitle,
+            matchedYear,
+            matchedType: omdbType,
+            posterUrl: poster && poster !== "N/A" ? poster : "",
+            total,
+            titleScore,
+            exactBoost,
+            yearBoost,
+            mediaBoost,
+            variant,
+          };
+          if (!row.imdbId) continue;
+          if (!bestHit || Number(row.total) > Number(bestHit.total)) bestHit = row;
         }
       }
-      return { url: "", label: "IMDb search", source: "IMDb find fallback (search only)", reason: gotAnyResponse ? "search_only" : "no_response" };
+
+      if (!bestHit) {
+        return {
+          url: "",
+          label: "",
+          posterUrl: "",
+          matchedTitle: "",
+          translatedTitle: "",
+          score: 0,
+          breakdown: hadResponse ? "OMDb worker: no title match." : "OMDb worker: no response.",
+          attempts,
+          reason: hadResponse ? "no_match" : "no_response",
+          matchedType: "",
+          matchedYear: 0,
+          variant: "",
+        };
+      }
+
+      return {
+        url: `https://www.imdb.com/title/${bestHit.imdbId}/`,
+        label: `IMDb (${bestHit.matchedTitle}${bestHit.matchedYear ? ` ${bestHit.matchedYear}` : ""})`,
+        posterUrl: bestHit.posterUrl,
+        matchedTitle: bestHit.matchedTitle,
+        translatedTitle: bestHit.translatedTitle,
+        score: Number(bestHit.total || 0),
+        breakdown: `OMDb(${bestHit.variant}): title=${bestHit.titleScore}, exact=${bestHit.exactBoost}, year=${bestHit.yearBoost}, media=${bestHit.mediaBoost}, total=${bestHit.total}`,
+        attempts,
+        reason: "ok",
+        matchedType: bestHit.matchedType,
+        matchedYear: Number(bestHit.matchedYear || 0),
+        variant: bestHit.variant,
+      };
     };
     const elcinemaFallback = async (
       title: string,
@@ -3118,43 +3172,41 @@ export default function App() {
                 ? `title=${Number(best?._titleScore ?? 0)}, exact=${Number(best?._exactTitleBoost ?? 0)}, year=${Number(best?._yearBoost ?? 0)}, media=${Number(best?._mediaBoost ?? 0)}, total=${matchScore}${bestYear ? `, matchedYear=${bestYear}` : ""}`
                 : "No TMDB candidate scored.";
               const extMeta = best ? await tmdbExternalMeta(Number(best.id), best._media_type) : null;
-              const imdbSuggest = await imdbSuggestFallback(searchTitle, year, preferredMedia);
-              const imdbFindDirect = await imdbFindDirectFallback(searchTitle, year);
+              const imdbWorker = await imdbWorkerFallback(searchTitle, year, preferredMedia);
               const elcinema = await elcinemaFallback(searchTitle, year);
               const imdbFallbackTitle = bestTitle || searchTitle;
               const imdbFallbackYear = bestYear || year || 0;
               const imdbFindUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(`${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""}`.trim())}`;
-              const preferredReferenceUrl = extMeta?.imdbUrl || imdbSuggest.url || imdbFindDirect.url || elcinema.url || imdbFindUrl;
+              const preferredReferenceUrl = extMeta?.imdbUrl || imdbWorker.url || elcinema.url || imdbFindUrl;
               const preferredReferenceLabel =
                 extMeta?.imdbLabel ||
-                imdbSuggest.label ||
-                imdbFindDirect.label ||
+                imdbWorker.label ||
                 elcinema.label ||
                 (bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search");
               const lookupSource = extMeta?.imdbUrl
                 ? "TMDB external IMDb ID"
-                : imdbSuggest.url
-                  ? "IMDb suggest match"
-                  : imdbFindDirect.url
-                    ? imdbFindDirect.source
-                    : elcinema.source
-                      ? elcinema.source
-                      : "IMDb search fallback";
+                : imdbWorker.url
+                  ? "OMDb worker match"
+                  : elcinema.source
+                    ? elcinema.source
+                    : "IMDb search fallback";
               const lookupDiagnostics = [
                 `tmdb_candidates=${scored.length}`,
-                `imdb_suggest_results=${imdbSuggest.resultCount}`,
-                `imdb_suggest_reason=${imdbSuggest.reason}`,
-                `imdb_find_reason=${imdbFindDirect.reason}`,
+                `omdb_attempts=${imdbWorker.attempts}`,
+                `omdb_reason=${imdbWorker.reason}`,
+                `omdb_variant=${imdbWorker.variant || "-"}`,
+                `omdb_type=${imdbWorker.matchedType || "-"}`,
+                `omdb_year=${imdbWorker.matchedYear || "-"}`,
                 `elcinema_reason=${elcinema.reason}`,
                 `chosen=${lookupSource}`,
                 `chosen_url=${preferredReferenceUrl || "-"}`,
               ].join(" | ");
-              const posterUrl = extMeta?.posterUrl || imdbSuggest.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : "");
-              const translatedTitle = extMeta?.translatedTitle || bestTitle || imdbSuggest.matchedTitle || foreignTitle || "-";
-              if (!best && imdbSuggest.matchedTitle) {
-                matchTitle = `IMDb fallback: ${imdbSuggest.matchedTitle}`;
-                matchScore = imdbSuggest.score;
-                matchBreakdown = imdbSuggest.breakdown;
+              const posterUrl = extMeta?.posterUrl || imdbWorker.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : "");
+              const translatedTitle = extMeta?.translatedTitle || bestTitle || imdbWorker.translatedTitle || foreignTitle || "-";
+              if (!best && imdbWorker.matchedTitle) {
+                matchTitle = `OMDb fallback: ${imdbWorker.matchedTitle}`;
+                matchScore = imdbWorker.score;
+                matchBreakdown = imdbWorker.breakdown;
               }
 
               reviewRows.push({
