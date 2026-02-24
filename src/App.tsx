@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.16";
+const APP_VERSION = "1.2.17";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -3167,22 +3167,16 @@ export default function App() {
               const elcinema = await elcinemaFallback(searchTitle, year);
               const imdbFallbackTitle = bestTitle || searchTitle;
               const imdbFallbackYear = bestYear || year || 0;
-              const googleFindUrl = `https://www.google.com/search?q=${encodeURIComponent(
-                `${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""} imdb elcinema`
+              const googleImdbUrl = `https://www.google.com/search?q=${encodeURIComponent(
+                `site:imdb.com/title ${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""}`
               )}`;
-              const preferredReferenceUrl = extMeta?.imdbUrl || imdbWorker.url || elcinema.url || googleFindUrl;
-              const preferredReferenceLabel =
-                extMeta?.imdbLabel ||
-                imdbWorker.label ||
-                elcinema.label ||
-                "Google search";
+              const preferredImdbUrl = extMeta?.imdbUrl || imdbWorker.url || googleImdbUrl;
+              const preferredImdbLabel = extMeta?.imdbLabel || imdbWorker.label || "Google IMDb search";
               const lookupSource = extMeta?.imdbUrl
                 ? "TMDB external IMDb ID"
                 : imdbWorker.url
                   ? "OMDb worker match"
-                  : elcinema.source
-                    ? elcinema.source
-                    : "IMDb search fallback";
+                  : "Google IMDb search fallback";
               const lookupDiagnostics = [
                 `tmdb_candidates=${scored.length}`,
                 `omdb_attempts=${imdbWorker.attempts}`,
@@ -3192,7 +3186,8 @@ export default function App() {
                 `omdb_year=${imdbWorker.matchedYear || "-"}`,
                 `elcinema_reason=${elcinema.reason}`,
                 `chosen=${lookupSource}`,
-                `chosen_url=${preferredReferenceUrl || "-"}`,
+                `chosen_url=${preferredImdbUrl || "-"}`,
+                `elcinema_url=${elcinema.url || "-"}`,
               ].join(" | ");
               const posterUrl = extMeta?.posterUrl || imdbWorker.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : "");
               const translatedTitle = extMeta?.translatedTitle || bestTitle || imdbWorker.translatedTitle || foreignTitle || "-";
@@ -3219,8 +3214,8 @@ export default function App() {
                 alt2Label,
                 youtubeUrl,
                 youtubeLabel,
-                imdbUrl: preferredReferenceUrl,
-                imdbLabel: preferredReferenceLabel,
+                imdbUrl: preferredImdbUrl,
+                imdbLabel: preferredImdbLabel,
                 elcinemaUrl: elcinema.url,
                 elcinemaLabel: elcinema.label,
                 lookupSource,
@@ -3252,8 +3247,8 @@ export default function App() {
                 alt2Label: "",
                 youtubeUrl: "",
                 youtubeLabel: "",
-                imdbUrl: `https://www.google.com/search?q=${encodeURIComponent(`${String(item.name ?? "")} imdb elcinema`)}`,
-                imdbLabel: "Google search",
+                imdbUrl: `https://www.google.com/search?q=${encodeURIComponent(`site:imdb.com/title ${String(item.name ?? "")}`)}`,
+                imdbLabel: "Google IMDb search",
                 elcinemaUrl: `https://elcinema.com/en/search/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 elcinemaLabel: "Elcinema search",
                 lookupSource: "Lookup error fallback",
