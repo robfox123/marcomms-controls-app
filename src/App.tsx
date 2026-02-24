@@ -6,14 +6,14 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.14";
+const APP_VERSION = "1.2.15";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
 const UPDATE_RETRY_BACKOFF_MS = 250;
 const DEPLOY_CONCURRENCY = 3;
-const MONDAY_RATE_RETRY_LIMIT = 6;
-const MONDAY_RATE_RETRY_BACKOFF_MS = 800;
+const MONDAY_RATE_RETRY_LIMIT = 10;
+const MONDAY_RATE_RETRY_BACKOFF_MS = 1200;
 const FETCH_CURSOR_MAX_PAGES = 80;
 const EXTERNAL_FETCH_TIMEOUT_MS = 12000;
 const MONDAY_API_TIMEOUT_MS = 25000;
@@ -352,7 +352,7 @@ async function mondayApiWithRetry(query: string, options: any): Promise<any> {
       await sleep(MONDAY_RATE_RETRY_BACKOFF_MS * (attempt + 1));
     }
   }
-  throw lastError ?? new Error("Monday API request failed.");
+  throw lastError ?? new Error(`Monday API request failed after ${MONDAY_RATE_RETRY_LIMIT + 1} attempts.`);
 }
 
 async function fetchGroups(boardId: number): Promise<Group[]> {
@@ -949,20 +949,6 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = EXTERNAL_FETCH_TIME
     return await res.json();
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function fetchTextWithTimeout(url: string, timeoutMs = EXTERNAL_FETCH_TIMEOUT_MS): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) return "";
-    return await res.text();
-  } catch {
-    return "";
   } finally {
     clearTimeout(timer);
   }
@@ -2671,19 +2657,28 @@ export default function App() {
 
   async function setFileColumnFromUrl(itemId: string, imageUrl: string) {
     if (!boardId) throw new Error("Board context not ready yet.");
-    const mutation = `
-      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
-        change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
+    const fileMutation = `
+      mutation ($itemId: ID!, $columnId: String!, $file: File!) {
+        add_file_to_column(item_id: $itemId, column_id: $columnId, file: $file) {
           id
         }
       }
     `;
-    await mondayApiWithRetry(mutation, {
+    const imageRes = await fetch(imageUrl);
+    if (!imageRes.ok) throw new Error(`Poster download failed (${imageRes.status}).`);
+    const blob = await imageRes.blob();
+    if (!blob || blob.size === 0) throw new Error("Poster download returned empty file.");
+    const rawName = imageUrl.split("/").pop() || "imdb_preview.jpg";
+    const safeName = rawName.replace(/[?#].*$/, "") || "imdb_preview.jpg";
+    const ext = safeName.includes(".") ? safeName.split(".").pop() : "";
+    const fileName = ext ? safeName : `${safeName}.jpg`;
+    const file = new File([blob], fileName, { type: blob.type || "image/jpeg" });
+
+    await mondayApiWithRetry(fileMutation, {
       variables: {
-        boardId,
         itemId,
         columnId: COL_SUGGESTED_IMAGE_FILE,
-        value: JSON.stringify({ files: [{ url: imageUrl, name: "imdb_preview.jpg" }] }),
+        file,
       },
     });
   }
@@ -3037,17 +3032,16 @@ export default function App() {
     ): Promise<{ url: string; label: string; source: string; reason: string }> => {
       const q = `${String(title || "").trim()} ${year || ""}`.trim();
       const searchUrl = `https://elcinema.com/en/search/?q=${encodeURIComponent(q)}`;
-      const proxyUrl = `https://r.jina.ai/http://elcinema.com/en/search/?q=${encodeURIComponent(q)}`;
-      const text = await fetchTextWithTimeout(proxyUrl);
-      if (!text) return { url: searchUrl, label: "Elcinema search", source: "Elcinema search fallback", reason: "no_response" };
-
-      const absMatch = text.match(/https?:\/\/(?:www\.)?elcinema\.com\/en\/work\/\d+\/?/i);
-      if (absMatch?.[0]) return { url: absMatch[0], label: "Elcinema title", source: "Elcinema work match", reason: "abs_work_match" };
-
-      const relMatch = text.match(/\/en\/work\/\d+\/?/i);
-      if (relMatch?.[0]) return { url: `https://elcinema.com${relMatch[0]}`, label: "Elcinema title", source: "Elcinema work match", reason: "rel_work_match" };
-
-      return { url: searchUrl, label: "Elcinema search", source: "Elcinema search fallback", reason: "search_only" };
+      const workerUrl = qs(`${LOOKUP_WORKER_URL}/elcinema`, { title, year });
+      const workerJson = await fetchJsonWithTimeout(workerUrl);
+      if (workerJson?.ok === true) {
+        const workUrl = String(workerJson?.url ?? "").trim();
+        const label = String(workerJson?.label ?? "").trim() || (workUrl ? "Elcinema title" : "Elcinema search");
+        const reason = String(workerJson?.reason ?? "").trim() || (workUrl ? "worker_work_match" : "worker_search_only");
+        if (workUrl) return { url: workUrl, label, source: "Elcinema worker match", reason };
+        return { url: searchUrl, label: "Elcinema search", source: "Elcinema search fallback", reason };
+      }
+      return { url: searchUrl, label: "Elcinema search", source: "Elcinema search fallback", reason: "worker_unavailable_search_only" };
     };
 
     try {
