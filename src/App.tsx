@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.15";
+const APP_VERSION = "1.2.16";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -141,7 +141,6 @@ type TrailerReviewRow = {
   youtubeLabel: string;
   imdbUrl: string;
   imdbLabel: string;
-  manualImdbUrl: string;
   elcinemaUrl: string;
   elcinemaLabel: string;
   lookupSource: string;
@@ -2727,13 +2726,12 @@ export default function App() {
         let noteParts: string[] = [];
         let appliedAny = false;
 
-        const manualUrl = String(row.manualImdbUrl || "").trim();
-        const effectiveImdbUrl = manualUrl || row.imdbUrl;
+        const effectiveImdbUrl = row.imdbUrl;
 
         if (row.confirmImdb && effectiveImdbUrl) {
           await setLinkColumnValue(row.itemId, COL_IMDB_LINK, effectiveImdbUrl, "IMDb");
           appliedAny = true;
-          noteParts.push(manualUrl ? "Manual IMDb link applied." : "IMDb link applied.");
+          noteParts.push("IMDb link applied.");
         }
 
         if (row.confirmImage && row.posterUrl) {
@@ -3155,7 +3153,6 @@ export default function App() {
               const youtubeUrl = youtube.url;
               const youtubeLabel = youtube.label;
               const bestTitle = String(best?.title ?? best?.name ?? "").trim();
-              const bestOriginal = String(best?.original_title ?? best?.original_name ?? "").trim();
               const bestLabel = best ? `${bestTitle || "-"} (${best?._media_type})` : "";
               const alt1Label = alt1 ? `${String(alt1?.title ?? alt1?.name ?? "")} (${alt1?._media_type})` : "";
               const alt2Label = alt2 ? `${String(alt2?.title ?? alt2?.name ?? "")} (${alt2?._media_type})` : "";
@@ -3170,13 +3167,15 @@ export default function App() {
               const elcinema = await elcinemaFallback(searchTitle, year);
               const imdbFallbackTitle = bestTitle || searchTitle;
               const imdbFallbackYear = bestYear || year || 0;
-              const imdbFindUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(`${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""}`.trim())}`;
-              const preferredReferenceUrl = extMeta?.imdbUrl || imdbWorker.url || elcinema.url || imdbFindUrl;
+              const googleFindUrl = `https://www.google.com/search?q=${encodeURIComponent(
+                `${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""} imdb elcinema`
+              )}`;
+              const preferredReferenceUrl = extMeta?.imdbUrl || imdbWorker.url || elcinema.url || googleFindUrl;
               const preferredReferenceLabel =
                 extMeta?.imdbLabel ||
                 imdbWorker.label ||
                 elcinema.label ||
-                (bestOriginal && bestOriginal !== bestTitle ? `IMDb (${bestOriginal})` : "IMDb search");
+                "Google search";
               const lookupSource = extMeta?.imdbUrl
                 ? "TMDB external IMDb ID"
                 : imdbWorker.url
@@ -3222,7 +3221,6 @@ export default function App() {
                 youtubeLabel,
                 imdbUrl: preferredReferenceUrl,
                 imdbLabel: preferredReferenceLabel,
-                manualImdbUrl: "",
                 elcinemaUrl: elcinema.url,
                 elcinemaLabel: elcinema.label,
                 lookupSource,
@@ -3254,9 +3252,8 @@ export default function App() {
                 alt2Label: "",
                 youtubeUrl: "",
                 youtubeLabel: "",
-                imdbUrl: `https://www.imdb.com/find/?q=${encodeURIComponent(String(item.name ?? ""))}`,
-                imdbLabel: "IMDb search",
-                manualImdbUrl: "",
+                imdbUrl: `https://www.google.com/search?q=${encodeURIComponent(`${String(item.name ?? "")} imdb elcinema`)}`,
+                imdbLabel: "Google search",
                 elcinemaUrl: `https://elcinema.com/en/search/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 elcinemaLabel: "Elcinema search",
                 lookupSource: "Lookup error fallback",
@@ -3467,9 +3464,6 @@ export default function App() {
                           Confirm IMDb
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Manual IMDb URL
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
                           Elcinema
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
@@ -3539,19 +3533,6 @@ export default function App() {
                                   prev.map((x) => (x.itemId === row.itemId ? { ...x, confirmImdb: e.target.checked } : x))
                                 )
                               }
-                            />
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <input
-                              value={row.manualImdbUrl}
-                              onChange={(e) =>
-                                setTrailerReviewRows((prev) =>
-                                  prev.map((x) => (x.itemId === row.itemId ? { ...x, manualImdbUrl: e.target.value } : x))
-                                )
-                              }
-                              disabled={busy}
-                              placeholder="https://www.imdb.com/title/tt..."
-                              style={{ minWidth: 220 }}
                             />
                           </td>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
