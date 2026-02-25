@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.19";
+const APP_VERSION = "1.2.20";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -859,7 +859,7 @@ function isInMarcommsValue(text?: string | null, value?: unknown): boolean {
   }
 }
 
-async function fetchBoardItemsForDeploy(boardId: number, onPage?: (loaded: number) => void): Promise<MondayBoardItem[]> {
+async function fetchBoardItemsForDeploy(boardId: number, onPage?: (loaded: number) => void, maxItems?: number): Promise<MondayBoardItem[]> {
   const query = `
     query ($boardId: [ID!], $cursor: String) {
       boards(ids: $boardId) {
@@ -896,6 +896,10 @@ async function fetchBoardItemsForDeploy(boardId: number, onPage?: (loaded: numbe
     const page = res?.data?.boards?.[0]?.items_page;
     const items = (page?.items ?? []) as MondayBoardItem[];
     allItems.push(...items);
+    if (maxItems && allItems.length >= maxItems) {
+      onPage?.(Math.min(allItems.length, maxItems));
+      return allItems.slice(0, maxItems);
+    }
     onPage?.(allItems.length);
     cursor = page?.cursor ?? null;
     if (!cursor) break;
@@ -2815,10 +2819,14 @@ export default function App() {
     setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
     setStatus(`Loading items for group ${trailerGroupId}...`);
     try {
-      const ids = await fetchItemIds(boardId, "group", trailerGroupId);
+      const allIds = await fetchItemIds(boardId, "group", trailerGroupId);
+      const ids = allIds.slice(0, TRAILER_TEST_LIMIT);
       if (!ids.length) {
         setStatus("No items in selected group.");
         return;
+      }
+      if (allIds.length > TRAILER_TEST_LIMIT) {
+        setStatus(`Test cap active: clearing first ${TRAILER_TEST_LIMIT} of ${allIds.length} group items...`);
       }
       setProgress({ done: 0, total: ids.length, ok: 0, failed: 0 });
       let done = 0;
@@ -3098,11 +3106,19 @@ export default function App() {
               setStatus("No items found for selected trailer scope.");
               return;
             }
-            scopedItems = await fetchBoardItemsByIds(boardId, scopedIds, (done, total) => {
+            const cappedIds = scopedIds.slice(0, TRAILER_TEST_LIMIT);
+            if (scopedIds.length > TRAILER_TEST_LIMIT) {
+              log(`Testing cap enabled: loading first ${TRAILER_TEST_LIMIT} of ${scopedIds.length} scoped IDs.`);
+            }
+            scopedItems = await fetchBoardItemsByIds(boardId, cappedIds, (done, total) => {
               setStatus(`Fetching scoped items... ${done}/${total}`);
             });
           } else {
-            scopedItems = await fetchBoardItemsForDeploy(boardId, (loaded) => setStatus(`Fetching board items... ${loaded} loaded`));
+            scopedItems = await fetchBoardItemsForDeploy(
+              boardId,
+              (loaded) => setStatus(`Fetching board items... ${loaded}/${TRAILER_TEST_LIMIT} loaded`),
+              TRAILER_TEST_LIMIT
+            );
           }
 
           const items = scopedItems.filter((item) => {
@@ -3111,9 +3127,6 @@ export default function App() {
             return !existingUrl && !existingText;
           });
           const runItems = items.slice(0, TRAILER_TEST_LIMIT);
-          if (items.length > TRAILER_TEST_LIMIT) {
-            log(`Testing cap enabled: processing first ${TRAILER_TEST_LIMIT} of ${items.length} scoped item(s).`);
-          }
           if (!runItems.length) {
             setStatus("No trailer updates needed. All scoped items already have trailer links.");
             return;
