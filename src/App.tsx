@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.18";
+const APP_VERSION = "1.2.19";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -301,6 +301,11 @@ function qs(base: string, params: Record<string, string | number | undefined>) {
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
     .join("&");
   return query ? `${base}?${query}` : base;
+}
+
+function buildGoogleImdbUrl(title: string, yearText?: string): string {
+  const q = [`"${String(title || "").trim()}"`, String(yearText || "").trim(), "imdb"].filter(Boolean).join(" ");
+  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
 }
 
 function formatApiError(error: any, fallback = "Unknown API error"): string {
@@ -2682,6 +2687,25 @@ export default function App() {
     });
   }
 
+  async function setFileColumnFromExternalUrl(itemId: string, imageUrl: string) {
+    if (!boardId) throw new Error("Board context not ready yet.");
+    const mutation = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+        change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
+          id
+        }
+      }
+    `;
+    await mondayApiWithRetry(mutation, {
+      variables: {
+        boardId,
+        itemId,
+        columnId: COL_SUGGESTED_IMAGE_FILE,
+        value: JSON.stringify({ files: [{ url: imageUrl, name: "imdb_preview.jpg" }] }),
+      },
+    });
+  }
+
   async function clearTrailerLinkValue(itemId: string) {
     if (!boardId) throw new Error("Board context not ready yet.");
     const mutation = `
@@ -2738,9 +2762,17 @@ export default function App() {
           try {
             await setFileColumnFromUrl(row.itemId, row.posterUrl);
             appliedAny = true;
-            noteParts.push("Poster image sent to file column.");
+            noteParts.push("Poster image uploaded to file column.");
           } catch (fileErr: any) {
-            noteParts.push(`Poster write failed: ${fileErr?.message ?? "unsupported by API context"}.`);
+            try {
+              await setFileColumnFromExternalUrl(row.itemId, row.posterUrl);
+              appliedAny = true;
+              noteParts.push("Poster image added by external URL fallback.");
+            } catch (urlErr: any) {
+              noteParts.push(
+                `Poster write failed. upload=${fileErr?.message ?? "unknown"} | url_fallback=${urlErr?.message ?? "unknown"}`
+              );
+            }
           }
         }
 
@@ -3167,10 +3199,9 @@ export default function App() {
               const elcinema = await elcinemaFallback(searchTitle, year);
               const imdbFallbackTitle = bestTitle || searchTitle;
               const imdbFallbackYear = bestYear || year || 0;
-              const googleImdbUrl = `https://www.google.com/search?q=${encodeURIComponent(
-                `site:imdb.com/title ${imdbFallbackTitle} ${imdbFallbackYear || yearText || ""}`
-              )}`;
-              const preferredImdbUrl = extMeta?.imdbUrl || imdbWorker.url || googleImdbUrl;
+              const googleImdbUrl = buildGoogleImdbUrl(imdbFallbackTitle, String(imdbFallbackYear || yearText || ""));
+              const candidateImdbUrl = extMeta?.imdbUrl || imdbWorker.url || "";
+              const preferredImdbUrl = /imdb\.com/i.test(candidateImdbUrl) ? candidateImdbUrl : googleImdbUrl;
               const preferredImdbLabel = extMeta?.imdbLabel || imdbWorker.label || "Google IMDb search";
               const lookupSource = extMeta?.imdbUrl
                 ? "TMDB external IMDb ID"
@@ -3247,7 +3278,7 @@ export default function App() {
                 alt2Label: "",
                 youtubeUrl: "",
                 youtubeLabel: "",
-                imdbUrl: `https://www.google.com/search?q=${encodeURIComponent(`site:imdb.com/title ${String(item.name ?? "")}`)}`,
+                imdbUrl: buildGoogleImdbUrl(String(item.name ?? "")),
                 imdbLabel: "Google IMDb search",
                 elcinemaUrl: `https://elcinema.com/en/search/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 elcinemaLabel: "Elcinema search",
