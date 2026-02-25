@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.17";
+const APP_VERSION = "1.2.18";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -18,7 +18,7 @@ const FETCH_CURSOR_MAX_PAGES = 80;
 const EXTERNAL_FETCH_TIMEOUT_MS = 12000;
 const MONDAY_API_TIMEOUT_MS = 25000;
 const TRAILER_RUN_TIMEOUT_MS = 300000;
-const TRAILER_TEST_GROUP_LIMIT = 10;
+const TRAILER_TEST_LIMIT = 5;
 const COL_CONTENT_TYPE = "status_1_mkn3yyv4";
 const COL_FOREIGN_TITLE = "text_mks31sjy";
 const COL_SEASON_YEAR_ALBUM = "text_mksd2s7y";
@@ -3078,9 +3078,9 @@ export default function App() {
             const existingText = getItemColumnText(item, COL_TRAILER_LINK);
             return !existingUrl && !existingText;
           });
-          const runItems = trailerScope === "group" ? items.slice(0, TRAILER_TEST_GROUP_LIMIT) : items;
-          if (trailerScope === "group" && items.length > TRAILER_TEST_GROUP_LIMIT) {
-            log(`Testing cap enabled: processing first ${TRAILER_TEST_GROUP_LIMIT} of ${items.length} group item(s).`);
+          const runItems = items.slice(0, TRAILER_TEST_LIMIT);
+          if (items.length > TRAILER_TEST_LIMIT) {
+            log(`Testing cap enabled: processing first ${TRAILER_TEST_LIMIT} of ${items.length} scoped item(s).`);
           }
           if (!runItems.length) {
             setStatus("No trailer updates needed. All scoped items already have trailer links.");
