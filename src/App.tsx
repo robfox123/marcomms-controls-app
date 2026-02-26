@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.22";
+const APP_VERSION = "1.2.23";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -18,7 +18,6 @@ const FETCH_CURSOR_MAX_PAGES = 80;
 const EXTERNAL_FETCH_TIMEOUT_MS = 12000;
 const MONDAY_API_TIMEOUT_MS = 25000;
 const TRAILER_RUN_TIMEOUT_MS = 300000;
-const TRAILER_TEST_LIMIT = 5;
 const COL_CONTENT_TYPE = "status_1_mkn3yyv4";
 const COL_FOREIGN_TITLE = "text_mks31sjy";
 const COL_SEASON_YEAR_ALBUM = "text_mksd2s7y";
@@ -2783,14 +2782,10 @@ export default function App() {
     setProgress({ done: 0, total: 0, ok: 0, failed: 0 });
     setStatus(`Loading items for group ${trailerGroupId}...`);
     try {
-      const allIds = await fetchItemIds(boardId, "group", trailerGroupId);
-      const ids = allIds.slice(0, TRAILER_TEST_LIMIT);
+      const ids = await fetchItemIds(boardId, "group", trailerGroupId);
       if (!ids.length) {
         setStatus("No items in selected group.");
         return;
-      }
-      if (allIds.length > TRAILER_TEST_LIMIT) {
-        setStatus(`Test cap active: clearing first ${TRAILER_TEST_LIMIT} of ${allIds.length} group items...`);
       }
       setProgress({ done: 0, total: ids.length, ok: 0, failed: 0 });
       let done = 0;
@@ -3070,19 +3065,11 @@ export default function App() {
               setStatus("No items found for selected trailer scope.");
               return;
             }
-            const cappedIds = scopedIds.slice(0, TRAILER_TEST_LIMIT);
-            if (scopedIds.length > TRAILER_TEST_LIMIT) {
-              log(`Testing cap enabled: loading first ${TRAILER_TEST_LIMIT} of ${scopedIds.length} scoped IDs.`);
-            }
-            scopedItems = await fetchBoardItemsByIds(boardId, cappedIds, (done, total) => {
+            scopedItems = await fetchBoardItemsByIds(boardId, scopedIds, (done, total) => {
               setStatus(`Fetching scoped items... ${done}/${total}`);
             });
           } else {
-            scopedItems = await fetchBoardItemsForDeploy(
-              boardId,
-              (loaded) => setStatus(`Fetching board items... ${loaded}/${TRAILER_TEST_LIMIT} loaded`),
-              TRAILER_TEST_LIMIT
-            );
+            scopedItems = await fetchBoardItemsForDeploy(boardId, (loaded) => setStatus(`Fetching board items... ${loaded} loaded`));
           }
 
           const items = scopedItems.filter((item) => {
@@ -3090,7 +3077,7 @@ export default function App() {
             const existingText = getItemColumnText(item, COL_TRAILER_LINK);
             return !existingUrl && !existingText;
           });
-          const runItems = items.slice(0, TRAILER_TEST_LIMIT);
+          const runItems = items;
           if (!runItems.length) {
             setStatus("No trailer updates needed. All scoped items already have trailer links.");
             return;
@@ -3178,13 +3165,14 @@ export default function App() {
               const imdbFallbackYear = bestYear || year || 0;
               const googleImdbUrl = buildGoogleImdbUrl(imdbFallbackTitle, String(imdbFallbackYear || yearText || ""));
               const candidateImdbUrl = extMeta?.imdbUrl || imdbWorker.url || "";
-              const preferredImdbUrl = /imdb\.com/i.test(candidateImdbUrl) ? candidateImdbUrl : googleImdbUrl;
-              const preferredImdbLabel = extMeta?.imdbLabel || imdbWorker.label || "Google IMDb search";
+              const hasImdbMatch = /imdb\.com/i.test(candidateImdbUrl);
+              const preferredImdbUrl = hasImdbMatch ? candidateImdbUrl : (elcinema.url || googleImdbUrl);
+              const preferredImdbLabel = hasImdbMatch ? (extMeta?.imdbLabel || imdbWorker.label || "IMDb") : "Not Found - elCinema Search";
               const lookupSource = extMeta?.imdbUrl
                 ? "TMDB external IMDb ID"
                 : imdbWorker.url
                   ? "OMDb worker match"
-                  : "Google IMDb search fallback";
+                  : "Not Found - elCinema Search";
               const lookupDiagnostics = [
                 `tmdb_candidates=${scored.length}`,
                 `omdb_attempts=${imdbWorker.attempts}`,
@@ -3255,8 +3243,8 @@ export default function App() {
                 alt2Label: "",
                 youtubeUrl: "",
                 youtubeLabel: "",
-                imdbUrl: buildGoogleImdbUrl(String(item.name ?? "")),
-                imdbLabel: "Google IMDb search",
+                imdbUrl: `https://elcinema.com/en/search/?q=${encodeURIComponent(String(item.name ?? ""))}`,
+                imdbLabel: "Not Found - elCinema Search",
                 elcinemaUrl: `https://elcinema.com/en/search/?q=${encodeURIComponent(String(item.name ?? ""))}`,
                 elcinemaLabel: "Elcinema search",
                 lookupSource: "Lookup error fallback",
@@ -3377,7 +3365,7 @@ export default function App() {
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button disabled={busy} onClick={runTrailerLinks}>
-                Add IMDB info
+                Add IMDb info
               </button>
               <button disabled={busy || trailerScope !== "group" || !trailerGroupId} onClick={removeTrailersForSelectedGroup}>
                 Remove trailers for selected group
