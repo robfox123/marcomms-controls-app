@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.23";
+const APP_VERSION = "1.2.24";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -304,6 +304,11 @@ function qs(base: string, params: Record<string, string | number | undefined>) {
 
 function buildGoogleImdbUrl(title: string, yearText?: string): string {
   const q = [`"${String(title || "").trim()}"`, String(yearText || "").trim(), "imdb"].filter(Boolean).join(" ");
+  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+}
+
+function buildGoogleElcinemaUrl(title: string, yearText?: string): string {
+  const q = [`site:elcinema.com/en/work`, `"${String(title || "").trim()}"`, String(yearText || "").trim()].filter(Boolean).join(" ");
   return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
 }
 
@@ -3028,17 +3033,18 @@ export default function App() {
       year: number | undefined
     ): Promise<{ url: string; label: string; source: string; reason: string }> => {
       const q = `${String(title || "").trim()} ${year || ""}`.trim();
-      const searchUrl = `https://elcinema.com/en/search/?q=${encodeURIComponent(q)}`;
+      const googleUrl = buildGoogleElcinemaUrl(title, String(year || ""));
       const workerUrl = qs(`${LOOKUP_WORKER_URL}/elcinema`, { title, year });
       const workerJson = await fetchJsonWithTimeout(workerUrl);
       if (workerJson?.ok === true) {
         const workUrl = String(workerJson?.url ?? "").trim();
         const label = String(workerJson?.label ?? "").trim() || (workUrl ? "Elcinema title" : "Elcinema search");
         const reason = String(workerJson?.reason ?? "").trim() || (workUrl ? "worker_work_match" : "worker_search_only");
-        if (workUrl) return { url: workUrl, label, source: "Elcinema worker match", reason };
-        return { url: searchUrl, label: "Elcinema search", source: "Elcinema search fallback", reason };
+        const isSearchOnly = reason.includes("search_only") || /\/en\/search\/\?q=/i.test(workUrl);
+        if (workUrl && !isSearchOnly) return { url: workUrl, label, source: "Elcinema worker match", reason };
+        return { url: googleUrl, label: "Not Found - elCinema Search", source: "elCinema google fallback", reason: "google_fallback" };
       }
-      return { url: searchUrl, label: "Elcinema search", source: "Elcinema search fallback", reason: "worker_unavailable_search_only" };
+      return { url: googleUrl, label: "Not Found - elCinema Search", source: "elCinema google fallback", reason: "worker_unavailable_google_fallback" };
     };
 
     try {
@@ -3161,14 +3167,17 @@ export default function App() {
               const extMeta = best ? await tmdbExternalMeta(Number(best.id), best._media_type) : null;
               const imdbWorker = await imdbWorkerFallback(searchTitle, year, preferredMedia);
               const elcinema = await elcinemaFallback(searchTitle, year);
+              const useOmdbAsPrimary = imdbWorker.reason === "ok" && (!best || imdbWorker.score >= matchScore + 20 || matchScore < 50);
               const imdbFallbackTitle = bestTitle || searchTitle;
               const imdbFallbackYear = bestYear || year || 0;
               const googleImdbUrl = buildGoogleImdbUrl(imdbFallbackTitle, String(imdbFallbackYear || yearText || ""));
-              const candidateImdbUrl = extMeta?.imdbUrl || imdbWorker.url || "";
+              const candidateImdbUrl = useOmdbAsPrimary ? (imdbWorker.url || extMeta?.imdbUrl || "") : (extMeta?.imdbUrl || imdbWorker.url || "");
               const hasImdbMatch = /imdb\.com/i.test(candidateImdbUrl);
               const preferredImdbUrl = hasImdbMatch ? candidateImdbUrl : (elcinema.url || googleImdbUrl);
-              const preferredImdbLabel = hasImdbMatch ? (extMeta?.imdbLabel || imdbWorker.label || "IMDb") : "Not Found - elCinema Search";
-              const lookupSource = extMeta?.imdbUrl
+              const preferredImdbLabel = hasImdbMatch ? (useOmdbAsPrimary ? (imdbWorker.label || extMeta?.imdbLabel || "IMDb") : (extMeta?.imdbLabel || imdbWorker.label || "IMDb")) : "Not Found - elCinema Search";
+              const lookupSource = useOmdbAsPrimary
+                ? "OMDb worker preferred match"
+                : extMeta?.imdbUrl
                 ? "TMDB external IMDb ID"
                 : imdbWorker.url
                   ? "OMDb worker match"
@@ -3185,9 +3194,13 @@ export default function App() {
                 `chosen_url=${preferredImdbUrl || "-"}`,
                 `elcinema_url=${elcinema.url || "-"}`,
               ].join(" | ");
-              const posterUrl = extMeta?.posterUrl || imdbWorker.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : "");
-              const translatedTitle = extMeta?.translatedTitle || bestTitle || imdbWorker.translatedTitle || foreignTitle || "-";
-              if (!best && imdbWorker.matchedTitle) {
+              const posterUrl = useOmdbAsPrimary
+                ? (imdbWorker.posterUrl || extMeta?.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : ""))
+                : (extMeta?.posterUrl || imdbWorker.posterUrl || (best?.poster_path ? `https://image.tmdb.org/t/p/w342${String(best.poster_path)}` : ""));
+              const translatedTitle = useOmdbAsPrimary
+                ? (imdbWorker.matchedTitle || searchTitle || "-")
+                : (extMeta?.translatedTitle || bestTitle || imdbWorker.translatedTitle || foreignTitle || "-");
+              if (useOmdbAsPrimary && imdbWorker.matchedTitle) {
                 matchTitle = `OMDb fallback: ${imdbWorker.matchedTitle}`;
                 matchScore = imdbWorker.score;
                 matchBreakdown = imdbWorker.breakdown;
