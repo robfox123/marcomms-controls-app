@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.21";
+const APP_VERSION = "1.2.22";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -3230,7 +3230,7 @@ export default function App() {
                 lookupDiagnostics,
                 posterUrl,
                 confirmImdb: true,
-                confirmImage: false,
+                confirmImage: Boolean(posterUrl),
                 selectedChoice: "no_trailer",
                 status: "pending_review",
                 note: "Review IMDb + image and apply.",
@@ -3377,7 +3377,7 @@ export default function App() {
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button disabled={busy} onClick={runTrailerLinks}>
-                Run Trailer links
+                Add IMDB info
               </button>
               <button disabled={busy || trailerScope !== "group" || !trailerGroupId} onClick={removeTrailersForSelectedGroup}>
                 Remove trailers for selected group
