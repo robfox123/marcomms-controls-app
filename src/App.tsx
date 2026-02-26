@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.20";
+const APP_VERSION = "1.2.21";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -2664,50 +2664,22 @@ export default function App() {
   }
 
   async function setFileColumnFromUrl(itemId: string, imageUrl: string) {
-    if (!boardId) throw new Error("Board context not ready yet.");
-    const fileMutation = `
-      mutation ($itemId: ID!, $columnId: String!, $file: File!) {
-        add_file_to_column(item_id: $itemId, column_id: $columnId, file: $file) {
-          id
-        }
-      }
-    `;
-    const imageRes = await fetch(imageUrl);
-    if (!imageRes.ok) throw new Error(`Poster download failed (${imageRes.status}).`);
-    const blob = await imageRes.blob();
-    if (!blob || blob.size === 0) throw new Error("Poster download returned empty file.");
-    const rawName = imageUrl.split("/").pop() || "imdb_preview.jpg";
-    const safeName = rawName.replace(/[?#].*$/, "") || "imdb_preview.jpg";
-    const ext = safeName.includes(".") ? safeName.split(".").pop() : "";
-    const fileName = ext ? safeName : `${safeName}.jpg`;
-    const file = new File([blob], fileName, { type: blob.type || "image/jpeg" });
-
-    await mondayApiWithRetry(fileMutation, {
-      variables: {
+    const endpoint = `${LOOKUP_WORKER_URL}/upload-poster`;
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
         itemId,
         columnId: COL_SUGGESTED_IMAGE_FILE,
-        file,
-      },
+        imageUrl,
+        fileName: "poster.jpg",
+      }),
     });
-  }
-
-  async function setFileColumnFromExternalUrl(itemId: string, imageUrl: string) {
-    if (!boardId) throw new Error("Board context not ready yet.");
-    const mutation = `
-      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
-        change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) {
-          id
-        }
-      }
-    `;
-    await mondayApiWithRetry(mutation, {
-      variables: {
-        boardId,
-        itemId,
-        columnId: COL_SUGGESTED_IMAGE_FILE,
-        value: JSON.stringify({ files: [{ url: imageUrl, name: "imdb_preview.jpg" }] }),
-      },
-    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json?.ok !== true) {
+      const detail = json?.error || json?.details?.errors?.[0]?.message || json?.status || "upload_failed";
+      throw new Error(`Poster upload worker failed: ${detail}`);
+    }
   }
 
   async function clearTrailerLinkValue(itemId: string) {
@@ -2766,17 +2738,9 @@ export default function App() {
           try {
             await setFileColumnFromUrl(row.itemId, row.posterUrl);
             appliedAny = true;
-            noteParts.push("Poster image uploaded to file column.");
+            noteParts.push("Poster image applied to file column.");
           } catch (fileErr: any) {
-            try {
-              await setFileColumnFromExternalUrl(row.itemId, row.posterUrl);
-              appliedAny = true;
-              noteParts.push("Poster image added by external URL fallback.");
-            } catch (urlErr: any) {
-              noteParts.push(
-                `Poster write failed. upload=${fileErr?.message ?? "unknown"} | url_fallback=${urlErr?.message ?? "unknown"}`
-              );
-            }
+            noteParts.push(`Poster write failed: ${fileErr?.message ?? "unknown"} | poster_url=${row.posterUrl}`);
           }
         }
 
