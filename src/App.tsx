@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "1.2.24";
+const APP_VERSION = "1.2.25";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -1248,6 +1248,8 @@ export default function App() {
   const [trailerMode, setTrailerMode] = useState<TrailerMode>("auto_mark_na");
   const [trailerLogs, setTrailerLogs] = useState<string[]>([]);
   const [trailerReviewRows, setTrailerReviewRows] = useState<TrailerReviewRow[]>([]);
+  const [trailerLogFilter, setTrailerLogFilter] = useState("");
+  const [trailerReviewFilter, setTrailerReviewFilter] = useState("");
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupId, setGroupId] = useState<string>("");
   const [trailerGroupId, setTrailerGroupId] = useState<string>("");
@@ -1395,6 +1397,32 @@ export default function App() {
     if (trailerScope === "group") return `Group: ${trailerGroupId || "None selected"}`;
     return "Entire board";
   }, [trailerScope, selectedItemIds.length, trailerGroupId]);
+  const filteredTrailerLogs = useMemo(() => {
+    const q = trailerLogFilter.trim().toLowerCase();
+    if (!q) return trailerLogs;
+    return trailerLogs.filter((line) => line.toLowerCase().includes(q));
+  }, [trailerLogs, trailerLogFilter]);
+  const filteredTrailerReviewRows = useMemo(() => {
+    const q = trailerReviewFilter.trim().toLowerCase();
+    if (!q) return trailerReviewRows;
+    return trailerReviewRows.filter((row) =>
+      [
+        row.itemId,
+        row.itemName,
+        row.searchTitle,
+        row.translatedTitle,
+        row.matchedOn,
+        row.imdbLabel,
+        row.imdbUrl,
+        row.lookupSource,
+        row.lookupDiagnostics,
+        row.status,
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [trailerReviewRows, trailerReviewFilter]);
   const selectedTitleLabels = useMemo(() => getTitleFieldLabels(pgOverrideSheet), [pgOverrideSheet]);
 
   const selectedSheetOverride = pgOverrides[pgOverrideSheet];
@@ -2949,50 +2977,53 @@ export default function App() {
       }
 
       const typeHints = preferredMedia === "movie" ? ["movie", ""] : preferredMedia === "tv" ? ["series", ""] : ["movie", "series", ""];
+      const yearHints = year ? [year, undefined] : [undefined];
       let bestHit: any = null;
       let attempts = 0;
       let hadResponse = false;
 
       for (const variant of variants) {
-        for (const typeHint of typeHints) {
-          attempts += 1;
-          const url = qs(`${LOOKUP_WORKER_URL}/lookup`, { title: variant, year, type: typeHint || undefined });
-          const json = await fetchJsonWithTimeout(url);
-          if (!json || json?.ok !== true) continue;
-          hadResponse = true;
+        for (const yrHint of yearHints) {
+          for (const typeHint of typeHints) {
+            attempts += 1;
+            const url = qs(`${LOOKUP_WORKER_URL}/lookup`, { title: variant, year: yrHint, type: typeHint || undefined });
+            const json = await fetchJsonWithTimeout(url);
+            if (!json || json?.ok !== true) continue;
+            hadResponse = true;
 
-          const omdb = json?.omdb ?? {};
-          if (String(omdb?.Response ?? "").toLowerCase() !== "true") continue;
+            const omdb = json?.omdb ?? {};
+            if (String(omdb?.Response ?? "").toLowerCase() !== "true") continue;
 
-          const imdbId = String(omdb?.imdbID ?? "").trim();
-          const matchedTitle = String(omdb?.Title ?? "").trim();
-          const matchedYear = Number(String(omdb?.Year ?? "").match(/\b(19|20)\d{2}\b/)?.[0] ?? 0) || 0;
-          const omdbTypeRaw = String(omdb?.Type ?? "").toLowerCase().trim();
-          const omdbType = omdbTypeRaw === "series" ? "tv" : omdbTypeRaw === "movie" ? "movie" : "";
-          const poster = String(omdb?.Poster ?? "").trim();
-          const titleScore = movieTokenSetScore(variant, matchedTitle);
-          const searchNorm = normalizeTitleAscii(variant);
-          const candidateNorm = normalizeTitleAscii(matchedTitle);
-          const exactBoost = candidateNorm && candidateNorm === searchNorm ? 30 : candidateNorm && searchNorm.includes(candidateNorm) ? 8 : 0;
-          const yearBoost = year && matchedYear ? (year === matchedYear ? 22 : Math.max(-14, 10 - Math.abs(year - matchedYear) * 4)) : 0;
-          const mediaBoost = preferredMedia === "movie" ? (omdbType === "movie" ? 12 : -12) : preferredMedia === "tv" ? (omdbType === "tv" ? 12 : -12) : 0;
-          const total = titleScore + exactBoost + yearBoost + mediaBoost;
-          const row = {
-            imdbId,
-            matchedTitle,
-            translatedTitle: matchedTitle,
-            matchedYear,
-            matchedType: omdbType,
-            posterUrl: poster && poster !== "N/A" ? poster : "",
-            total,
-            titleScore,
-            exactBoost,
-            yearBoost,
-            mediaBoost,
-            variant,
-          };
-          if (!row.imdbId) continue;
-          if (!bestHit || Number(row.total) > Number(bestHit.total)) bestHit = row;
+            const imdbId = String(omdb?.imdbID ?? "").trim();
+            const matchedTitle = String(omdb?.Title ?? "").trim();
+            const matchedYear = Number(String(omdb?.Year ?? "").match(/\b(19|20)\d{2}\b/)?.[0] ?? 0) || 0;
+            const omdbTypeRaw = String(omdb?.Type ?? "").toLowerCase().trim();
+            const omdbType = omdbTypeRaw === "series" ? "tv" : omdbTypeRaw === "movie" ? "movie" : "";
+            const poster = String(omdb?.Poster ?? "").trim();
+            const titleScore = movieTokenSetScore(variant, matchedTitle);
+            const searchNorm = normalizeTitleAscii(variant);
+            const candidateNorm = normalizeTitleAscii(matchedTitle);
+            const exactBoost = candidateNorm && candidateNorm === searchNorm ? 30 : candidateNorm && searchNorm.includes(candidateNorm) ? 8 : 0;
+            const yearBoost = year && matchedYear ? (year === matchedYear ? 22 : Math.max(-14, 10 - Math.abs(year - matchedYear) * 4)) : 0;
+            const mediaBoost = preferredMedia === "movie" ? (omdbType === "movie" ? 12 : -12) : preferredMedia === "tv" ? (omdbType === "tv" ? 12 : -12) : 0;
+            const total = titleScore + exactBoost + yearBoost + mediaBoost;
+            const row = {
+              imdbId,
+              matchedTitle,
+              translatedTitle: matchedTitle,
+              matchedYear,
+              matchedType: omdbType,
+              posterUrl: poster && poster !== "N/A" ? poster : "",
+              total,
+              titleScore,
+              exactBoost,
+              yearBoost,
+              mediaBoost,
+              variant,
+            };
+            if (!row.imdbId) continue;
+            if (!bestHit || Number(row.total) > Number(bestHit.total)) bestHit = row;
+          }
         }
       }
 
@@ -3412,6 +3443,13 @@ export default function App() {
               <div style={{ marginTop: 8 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
                   <strong>Output</strong>
+                  <input
+                    value={trailerLogFilter}
+                    onChange={(e) => setTrailerLogFilter(e.target.value)}
+                    placeholder="Filter output..."
+                    disabled={busy && trailerLogs.length === 0}
+                    style={{ minWidth: 220 }}
+                  />
                   <button
                     disabled={busy || trailerLogs.length === 0}
                     onClick={() => setTrailerLogs([])}
@@ -3432,13 +3470,23 @@ export default function App() {
                     whiteSpace: "pre-wrap",
                   }}
                 >
-                  {trailerLogs.length ? trailerLogs.join("\n") : "No output yet."}
+                  {filteredTrailerLogs.length ? filteredTrailerLogs.join("\n") : "No output yet."}
                 </div>
               </div>
             </div>
             {trailerReviewRows.length > 0 && (
               <div style={{ marginTop: 12 }}>
-                <h4 style={{ margin: "0 0 8px 0" }}>Trailer Review Table</h4>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "0 0 8px 0" }}>
+                  <h4 style={{ margin: 0 }}>Trailer Review Table</h4>
+                  <input
+                    value={trailerReviewFilter}
+                    onChange={(e) => setTrailerReviewFilter(e.target.value)}
+                    placeholder="Filter table..."
+                    disabled={busy && trailerReviewRows.length === 0}
+                    style={{ minWidth: 220 }}
+                  />
+                  <span style={{ opacity: 0.7 }}>{filteredTrailerReviewRows.length}/{trailerReviewRows.length}</span>
+                </div>
                 <div style={{ maxHeight: 360, overflow: "auto", border: "1px solid #ddd" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead>
@@ -3491,7 +3539,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {trailerReviewRows.map((row) => (
+                      {filteredTrailerReviewRows.map((row) => (
                         <tr key={`trailer-review-${row.itemId}`}>
                           <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
                             {row.itemName} ({row.itemId})
