@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "2.0.2";
+const APP_VERSION = "2.0.3";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -24,6 +24,8 @@ const COL_SEASON_YEAR_ALBUM = "text_mksd2s7y";
 const COL_TRAILER_LINK = "link_mks3yxj3";
 const COL_IMDB_LINK = "link_mm0wf2nf";
 const COL_SUGGESTED_IMAGE_FILE = "file_mkszyxdh";
+const COL_MASTER_ARTWORK_FILE = "file_mkwdr901";
+const COL_LOGO_FILE = "file_mkwdpwc0";
 const COL_CYCLE = "text_mkxga9d";
 const COL_CYCLE_EXPIRED = "text_mm0pw9kx";
 const COL_CYCLE_EXPIRED_FALLBACK = "lookup_mm0p6m5c";
@@ -41,6 +43,9 @@ type Scope = "selected" | "group" | "board";
 type TrailerMode = "auto_mark_na" | "auto_only";
 type TrailerChoice = "best_tmdb" | "alt_1" | "alt_2" | "youtube" | "no_trailer";
 type Workflow = "home" | "align" | "pg" | "archive";
+type HomeSection = "align" | "trailer" | "images" | null;
+type ImageContentFilter = "all" | "movies" | "tv" | "audio";
+type ImageTypeFilter = "master" | "logo";
 type Group = { id: string; title: string };
 type Progress = { done: number; total: number; ok: number; failed: number };
 type FailedUpdate = { itemId: string; message: string };
@@ -120,6 +125,12 @@ type MondayBoardItem = {
   id: string;
   name?: string | null;
   column_values?: Array<{ id: string; text?: string | null; value?: unknown }>;
+};
+type MondayAsset = {
+  id: string;
+  name?: string | null;
+  public_url?: string | null;
+  url?: string | null;
 };
 type TrailerReviewRow = {
   itemId: string;
@@ -1253,6 +1264,15 @@ export default function App() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupId, setGroupId] = useState<string>("");
   const [trailerGroupId, setTrailerGroupId] = useState<string>("");
+  const [imageGroupId, setImageGroupId] = useState<string>("");
+  const [imageRows, setImageRows] = useState<MondayBoardItem[]>([]);
+  const [imageFilterContent, setImageFilterContent] = useState<ImageContentFilter>("all");
+  const [imageFilterType, setImageFilterType] = useState<ImageTypeFilter>("master");
+  const [imageSearch, setImageSearch] = useState("");
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageStatus, setImageStatus] = useState("Select a group to load images.");
+  const [imageDownloadKey, setImageDownloadKey] = useState("");
+  const [homeOpenSection, setHomeOpenSection] = useState<HomeSection>("align");
   const [workflow, setWorkflow] = useState<Workflow>("home");
   const [alignStep, setAlignStep] = useState<1 | 2>(1);
   const [pgStep, setPgStep] = useState<1 | 2 | 3>(1);
@@ -1341,6 +1361,9 @@ export default function App() {
         if (nextGroups.length && !trailerGroupId) {
           setTrailerGroupId(nextGroups[0].id);
         }
+        if (nextGroups.length && !imageGroupId) {
+          setImageGroupId(nextGroups[0].id);
+        }
       } catch (error: any) {
         if (!mounted) return;
         setStatus(`Failed to fetch groups: ${error?.message ?? String(error)}`);
@@ -1350,7 +1373,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [boardId, groupId, trailerGroupId]);
+  }, [boardId, groupId, trailerGroupId, imageGroupId]);
 
   useEffect(() => {
     let mounted = true;
@@ -1423,6 +1446,194 @@ export default function App() {
         .includes(q)
     );
   }, [trailerReviewRows, trailerReviewFilter]);
+  const imageTypeLabel = imageFilterType === "master" ? "Master Artwork" : "Logo";
+
+  function getContentBucket(contentType: string): ImageContentFilter {
+    const value = String(contentType || "").toLowerCase();
+    if (value.includes("movie") || value.includes("film")) return "movies";
+    if (value.includes("tv") || value.includes("series")) return "tv";
+    if (value.includes("music") || value.includes("podcast") || value.includes("audio")) return "audio";
+    return "all";
+  }
+
+  function parseJsonLoose(input: unknown): unknown {
+    if (typeof input !== "string") return input;
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return input;
+    }
+  }
+
+  function extractFileMetadata(raw: unknown): { urls: string[]; assetIds: string[]; names: string[] } {
+    const root = parseJsonLoose(raw);
+    const urls = new Set<string>();
+    const assetIds = new Set<string>();
+    const names = new Set<string>();
+
+    const visit = (value: unknown, keyHint = "") => {
+      if (value === null || value === undefined) return;
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+        const lowerHint = keyHint.toLowerCase();
+        if ((lowerHint.includes("url") || lowerHint.includes("link")) && /^https?:\/\//i.test(trimmed)) {
+          urls.add(trimmed);
+        }
+        if ((lowerHint === "name" || lowerHint.includes("file_name") || lowerHint.includes("filename")) && trimmed) {
+          names.add(trimmed);
+        }
+        const nested = parseJsonLoose(value);
+        if (nested !== value) visit(nested, keyHint);
+        return;
+      }
+      if (typeof value !== "object") return;
+      if (Array.isArray(value)) {
+        for (const entry of value) visit(entry, keyHint);
+        return;
+      }
+      const obj = value as Record<string, unknown>;
+      for (const [key, nested] of Object.entries(obj)) {
+        const lowerKey = key.toLowerCase();
+        if ((lowerKey === "assetid" || lowerKey === "asset_id") && nested !== null && nested !== undefined) {
+          assetIds.add(String(nested));
+        }
+        visit(nested, key);
+      }
+    };
+
+    visit(root);
+    return { urls: Array.from(urls), assetIds: Array.from(assetIds), names: Array.from(names) };
+  }
+
+  async function fetchAssetDownload(ids: string[]): Promise<{ url: string; name: string }> {
+    const assetIds = Array.from(new Set(ids.map((x) => String(x).trim()).filter(Boolean)));
+    if (!assetIds.length) return { url: "", name: "" };
+    const query = `
+      query ($ids: [ID!]) {
+        assets(ids: $ids) {
+          id
+          name
+          public_url
+          url
+        }
+      }
+    `;
+    const res = await mondayApiWithRetry(query, { variables: { ids: assetIds } });
+    const assets = (res?.data?.assets ?? []) as MondayAsset[];
+    for (const asset of assets) {
+      const url = String(asset?.public_url ?? asset?.url ?? "").trim();
+      if (url) return { url, name: String(asset?.name ?? "").trim() };
+    }
+    return { url: "", name: "" };
+  }
+
+  function triggerDownload(url: string, fallbackName: string) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    anchor.download = fallbackName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }
+
+  async function loadImageRowsForGroup(nextGroupId: string) {
+    if (!boardId) {
+      setImageStatus("Board context not ready yet.");
+      setImageRows([]);
+      return;
+    }
+    if (!nextGroupId) {
+      setImageStatus("Select a group to load images.");
+      setImageRows([]);
+      return;
+    }
+
+    setImageBusy(true);
+    setImageStatus("Loading group items...");
+    try {
+      const ids = await fetchItemIds(boardId, "group", nextGroupId);
+      if (!ids.length) {
+        setImageRows([]);
+        setImageStatus("No items in selected group.");
+        return;
+      }
+      const items = await fetchBoardItemsByIds(boardId, ids.map(String), (done, total) => {
+        setImageStatus(`Loading item details... ${done}/${total}`);
+      });
+      setImageRows(items);
+      setImageStatus(`Loaded ${items.length} rows from selected group.`);
+    } catch (error: any) {
+      setImageRows([]);
+      setImageStatus(`Image loading failed: ${formatApiError(error)}`);
+    } finally {
+      setImageBusy(false);
+    }
+  }
+
+  async function downloadImageForItem(item: MondayBoardItem, type: ImageTypeFilter) {
+    const columnId = type === "master" ? COL_MASTER_ARTWORK_FILE : COL_LOGO_FILE;
+    const rowKey = `${item.id}:${type}`;
+    setImageDownloadKey(rowKey);
+    try {
+      const col = getItemColumn(item, columnId);
+      const meta = extractFileMetadata(col?.value);
+      const directUrl = meta.urls[0] ?? "";
+      const fromAsset = directUrl ? { url: directUrl, name: meta.names[0] ?? "" } : await fetchAssetDownload(meta.assetIds);
+      const url = String(fromAsset.url || "").trim();
+      const fileName = String(fromAsset.name || meta.names[0] || `${String(item.name || item.id)}-${type}.jpg`).trim();
+
+      if (!url) {
+        setImageStatus(`No downloadable ${type === "master" ? "Master Artwork" : "Logo"} found for item ${item.id}.`);
+        return;
+      }
+
+      triggerDownload(url, fileName);
+      setImageStatus(`Download started for ${String(item.name || item.id)} (${type === "master" ? "Master Artwork" : "Logo"}).`);
+    } catch (error: any) {
+      setImageStatus(`Download failed for item ${item.id}: ${formatApiError(error)}`);
+    } finally {
+      setImageDownloadKey("");
+    }
+  }
+
+  useEffect(() => {
+    if (!boardId || !imageGroupId) return;
+    void loadImageRowsForGroup(imageGroupId);
+  }, [boardId, imageGroupId]);
+
+  const imageRowsWithMeta = useMemo(() => {
+    return imageRows.map((item) => {
+      const contentType = getItemColumnText(item, COL_CONTENT_TYPE);
+      const contentBucket = getContentBucket(contentType);
+      const masterCol = getItemColumn(item, COL_MASTER_ARTWORK_FILE);
+      const logoCol = getItemColumn(item, COL_LOGO_FILE);
+      const masterMeta = extractFileMetadata(masterCol?.value);
+      const logoMeta = extractFileMetadata(logoCol?.value);
+      const hasMaster = Boolean(masterMeta.urls.length || masterMeta.assetIds.length || String(masterCol?.text ?? "").trim());
+      const hasLogo = Boolean(logoMeta.urls.length || logoMeta.assetIds.length || String(logoCol?.text ?? "").trim());
+      return {
+        item,
+        contentType,
+        contentBucket,
+        hasMaster,
+        hasLogo,
+      };
+    });
+  }, [imageRows]);
+
+  const filteredImageRows = useMemo(() => {
+    const q = imageSearch.trim().toLowerCase();
+    return imageRowsWithMeta.filter((row) => {
+      if (imageFilterContent !== "all" && row.contentBucket !== imageFilterContent) return false;
+      if (!q) return true;
+      const hay = [row.item.id, row.item.name, row.contentType].join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+  }, [imageRowsWithMeta, imageFilterContent, imageSearch]);
   const selectedTitleLabels = useMemo(() => getTitleFieldLabels(pgOverrideSheet), [pgOverrideSheet]);
 
   const selectedSheetOverride = pgOverrides[pgOverrideSheet];
@@ -3342,152 +3553,411 @@ export default function App() {
       )}
 
       {workflow === "home" && (
-        <div>
-          <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
-            <button
-              onClick={() => {
-                setWorkflow("align");
-                setAlignStep(1);
-              }}
-              style={{ textAlign: "left", padding: 12 }}
+        <div style={{ display: "grid", gap: 12 }}>
+          <div style={{ border: "1px solid #d1d5db", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+            <div
+              onClick={() => setHomeOpenSection((prev) => (prev === "align" ? null : "align"))}
+              style={{ cursor: "pointer", padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}
             >
-              <strong>Align 'In Marcomms'</strong>
-              <div style={{ opacity: 0.7, marginTop: 6 }}>Reset and align Marcomms values against current selection.</div>
-            </button>
-            <button
-              onClick={() => {
-                setWorkflow("pg");
-                setPgStep(1);
-              }}
-              style={{ textAlign: "left", padding: 12 }}
-            >
-              <strong>Updates Items to latest Programme Grid</strong>
-              <div style={{ opacity: 0.7, marginTop: 6 }}>Load latest grid data, validate mappings, then deploy updates.</div>
-            </button>
-            <button onClick={() => setWorkflow("archive")} style={{ textAlign: "left", padding: 12 }}>
-              <strong>Archive old items</strong>
-              <div style={{ opacity: 0.7, marginTop: 6 }}>Identify and archive stale content items from previous cycles.</div>
-            </button>
-          </div>
-
-          <div style={{ marginTop: 14, padding: 12, border: "1px solid #ddd" }}>
-            <h3 style={{ marginTop: 0, marginBottom: 8 }}>Trailer links</h3>
-            <p style={{ marginTop: 0, opacity: 0.8 }}>Run the Trailer links Monday API operation.</p>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-              <label>
-                Mode{" "}
-                <select disabled={busy} value={trailerMode} onChange={(e) => setTrailerMode(e.target.value as TrailerMode)}>
-                  <option value="auto_mark_na">Automatic</option>
-                  <option value="auto_only">Automatic (no NOT AVAILABLE writes)</option>
-                </select>
-              </label>
-              <label>
-                Scope{" "}
-                <select disabled={busy} value={trailerScope} onChange={(e) => setTrailerScope(e.target.value as Scope)}>
-                  <option value="selected">Selected</option>
-                  <option value="group">Group</option>
-                  <option value="board">Board</option>
-                </select>
-              </label>
-              {trailerScope === "group" && (
-                <label>
-                  Group{" "}
-                  <select disabled={busy} value={trailerGroupId} onChange={(e) => setTrailerGroupId(e.target.value)}>
-                    {groups.length === 0 ? (
-                      <option value="">No groups</option>
-                    ) : (
-                      groups.map((g) => (
-                        <option key={g.id} value={g.id}>
-                          {g.title}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </label>
-              )}
-              <span style={{ opacity: 0.7 }}>{trailerScopeHint}</span>
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button disabled={busy} onClick={runTrailerLinks}>
-                Add IMDb info
-              </button>
-              <button disabled={busy || trailerScope !== "group" || !trailerGroupId} onClick={removeTrailersForSelectedGroup}>
-                Remove trailers for selected group
-              </button>
-              <button disabled={busy || trailerReviewRows.length === 0} onClick={applyTrailerReviewSelections}>
-                Apply selected choices
-              </button>
-            </div>
-            <div style={{ marginTop: 10, fontSize: 13 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <span>Status: {busy && status.toLowerCase().includes("trailer links") ? "Working" : "Idle"}</span>
-                {busy && status.toLowerCase().includes("trailer links") && (
-                  <span
-                    style={{
-                      width: 14,
-                      height: 14,
-                      borderRadius: "50%",
-                      border: "2px solid #cbd5e1",
-                      borderTopColor: "#475569",
-                      display: "inline-block",
-                      animation: "spin 0.8s linear infinite",
-                    }}
-                  />
-                )}
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 18 }}>Align Promos and Mechandising Content</div>
+                <div style={{ opacity: 0.7, marginTop: 4 }}>Run the three operations below.</div>
               </div>
-              <div style={{ marginTop: 4 }}>{status}</div>
-              <progress value={progress.done} max={Math.max(progress.total, 1)} style={{ width: 360, height: 14, marginTop: 6 }} />
-              <div style={{ marginTop: 4, opacity: 0.8 }}>
-                Progress: {progress.done}/{progress.total} | Success: {progress.ok} | Failed: {progress.failed}
-              </div>
-              <div style={{ marginTop: 8 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
-                  <strong>Output</strong>
-                  <input
-                    value={trailerLogFilter}
-                    onChange={(e) => setTrailerLogFilter(e.target.value)}
-                    placeholder="Filter output..."
-                    disabled={busy && trailerLogs.length === 0}
-                    style={{ minWidth: 220 }}
-                  />
+              <span style={{ fontSize: 18, opacity: 0.7 }}>{homeOpenSection === "align" ? "▾" : "▸"}</span>
+            </div>
+            {homeOpenSection === "align" && (
+              <div style={{ padding: 12, borderTop: "1px solid #e5e7eb" }}>
+                <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
                   <button
-                    disabled={busy || trailerLogs.length === 0}
-                    onClick={() => setTrailerLogs([])}
-                    style={{ fontSize: 12, padding: "2px 6px" }}
+                    onClick={() => {
+                      setWorkflow("align");
+                      setAlignStep(1);
+                    }}
+                    style={{ textAlign: "left", padding: 12 }}
                   >
-                    Clear
+                    <strong>Align 'In Marcomms'</strong>
+                    <div style={{ opacity: 0.7, marginTop: 6 }}>Reset and align Marcomms values against current selection.</div>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setWorkflow("pg");
+                      setPgStep(1);
+                    }}
+                    style={{ textAlign: "left", padding: 12 }}
+                  >
+                    <strong>Updates Items to latest Programme Grid</strong>
+                    <div style={{ opacity: 0.7, marginTop: 6 }}>Load latest grid data, validate mappings, then deploy updates.</div>
+                  </button>
+                  <button onClick={() => setWorkflow("archive")} style={{ textAlign: "left", padding: 12 }}>
+                    <strong>Archive old items</strong>
+                    <div style={{ opacity: 0.7, marginTop: 6 }}>Identify and archive stale content items from previous cycles.</div>
                   </button>
                 </div>
-                <div
-                  style={{
-                    border: "1px solid #ddd",
-                    background: "#fafafa",
-                    padding: 8,
-                    maxHeight: 180,
-                    overflow: "auto",
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                    fontSize: 12,
-                    whiteSpace: "pre-wrap",
-                  }}
-                >
-                  {filteredTrailerLogs.length ? filteredTrailerLogs.join("\n") : "No output yet."}
-                </div>
               </div>
+            )}
+          </div>
+
+          <div style={{ border: "1px solid #d1d5db", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+            <div
+              onClick={() => setHomeOpenSection((prev) => (prev === "trailer" ? null : "trailer"))}
+              style={{ cursor: "pointer", padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}
+            >
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 18 }}>Trailer Links</div>
+                <div style={{ opacity: 0.7, marginTop: 4 }}>Run the Trailer links Monday API operation.</div>
+              </div>
+              <span style={{ fontSize: 18, opacity: 0.7 }}>{homeOpenSection === "trailer" ? "▾" : "▸"}</span>
             </div>
-            {trailerReviewRows.length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "0 0 8px 0" }}>
-                  <h4 style={{ margin: 0 }}>Trailer Review Table</h4>
-                  <input
-                    value={trailerReviewFilter}
-                    onChange={(e) => setTrailerReviewFilter(e.target.value)}
-                    placeholder="Filter table..."
-                    disabled={busy && trailerReviewRows.length === 0}
-                    style={{ minWidth: 220 }}
-                  />
-                  <span style={{ opacity: 0.7 }}>{filteredTrailerReviewRows.length}/{trailerReviewRows.length}</span>
+            {homeOpenSection === "trailer" && (
+              <div style={{ padding: 12, borderTop: "1px solid #e5e7eb" }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+                  <label>
+                    Mode{" "}
+                    <select disabled={busy} value={trailerMode} onChange={(e) => setTrailerMode(e.target.value as TrailerMode)}>
+                      <option value="auto_mark_na">Automatic</option>
+                      <option value="auto_only">Automatic (no NOT AVAILABLE writes)</option>
+                    </select>
+                  </label>
+                  <label>
+                    Scope{" "}
+                    <select disabled={busy} value={trailerScope} onChange={(e) => setTrailerScope(e.target.value as Scope)}>
+                      <option value="selected">Selected</option>
+                      <option value="group">Group</option>
+                      <option value="board">Board</option>
+                    </select>
+                  </label>
+                  {trailerScope === "group" && (
+                    <label>
+                      Group{" "}
+                      <select disabled={busy} value={trailerGroupId} onChange={(e) => setTrailerGroupId(e.target.value)}>
+                        {groups.length === 0 ? (
+                          <option value="">No groups</option>
+                        ) : (
+                          groups.map((g) => (
+                            <option key={g.id} value={g.id}>
+                              {g.title}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                  )}
+                  <span style={{ opacity: 0.7 }}>{trailerScopeHint}</span>
                 </div>
-                <div style={{ maxHeight: 360, overflow: "auto", border: "1px solid #ddd" }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button disabled={busy} onClick={runTrailerLinks}>
+                    Add IMDb info
+                  </button>
+                  <button disabled={busy || trailerScope !== "group" || !trailerGroupId} onClick={removeTrailersForSelectedGroup}>
+                    Remove trailers for selected group
+                  </button>
+                  <button disabled={busy || trailerReviewRows.length === 0} onClick={applyTrailerReviewSelections}>
+                    Apply selected choices
+                  </button>
+                </div>
+                <div style={{ marginTop: 10, fontSize: 13 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>Status: {busy && status.toLowerCase().includes("trailer links") ? "Working" : "Idle"}</span>
+                    {busy && status.toLowerCase().includes("trailer links") && (
+                      <span
+                        style={{
+                          width: 14,
+                          height: 14,
+                          borderRadius: "50%",
+                          border: "2px solid #cbd5e1",
+                          borderTopColor: "#475569",
+                          display: "inline-block",
+                          animation: "spin 0.8s linear infinite",
+                        }}
+                      />
+                    )}
+                  </div>
+                  <div style={{ marginTop: 4 }}>{status}</div>
+                  <progress value={progress.done} max={Math.max(progress.total, 1)} style={{ width: 360, height: 14, marginTop: 6 }} />
+                  <div style={{ marginTop: 4, opacity: 0.8 }}>
+                    Progress: {progress.done}/{progress.total} | Success: {progress.ok} | Failed: {progress.failed}
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                      <strong>Output</strong>
+                      <input
+                        value={trailerLogFilter}
+                        onChange={(e) => setTrailerLogFilter(e.target.value)}
+                        placeholder="Filter output..."
+                        disabled={busy && trailerLogs.length === 0}
+                        style={{ minWidth: 220 }}
+                      />
+                      <button
+                        disabled={busy || trailerLogs.length === 0}
+                        onClick={() => setTrailerLogs([])}
+                        style={{ fontSize: 12, padding: "2px 6px" }}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div
+                      style={{
+                        border: "1px solid #ddd",
+                        background: "#fafafa",
+                        padding: 8,
+                        maxHeight: 180,
+                        overflow: "auto",
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        fontSize: 12,
+                        whiteSpace: "pre-wrap",
+                      }}
+                    >
+                      {filteredTrailerLogs.length ? filteredTrailerLogs.join("\n") : "No output yet."}
+                    </div>
+                  </div>
+                </div>
+                {trailerReviewRows.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "0 0 8px 0" }}>
+                      <h4 style={{ margin: 0 }}>Trailer Review Table</h4>
+                      <input
+                        value={trailerReviewFilter}
+                        onChange={(e) => setTrailerReviewFilter(e.target.value)}
+                        placeholder="Filter table..."
+                        disabled={busy && trailerReviewRows.length === 0}
+                        style={{ minWidth: 220 }}
+                      />
+                      <span style={{ opacity: 0.7 }}>{filteredTrailerReviewRows.length}/{trailerReviewRows.length}</span>
+                    </div>
+                    <div style={{ maxHeight: 360, overflow: "auto", border: "1px solid #ddd" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                        <thead>
+                          <tr>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Item
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Searched title
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Translation
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Year/Season
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              IMDb image
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Confirm image
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              IMDb link
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Confirm IMDb
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Elcinema
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Lookup source
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Lookup diagnostics
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Matched on
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Score
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Match breakdown
+                            </th>
+                            <th
+                              style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}
+                            >
+                              Status
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredTrailerReviewRows.map((row) => (
+                            <tr key={`trailer-review-${row.itemId}`}>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                                {row.itemName} ({row.itemId})
+                              </td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.searchTitle}</td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.translatedTitle}</td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.yearText}</td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                                {row.posterUrl ? (
+                                  <img src={row.posterUrl} alt={row.itemName} style={{ width: 84, height: 126, objectFit: "cover", borderRadius: 2 }} />
+                                ) : (
+                                  "-"
+                                )}
+                              </td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                                <input
+                                  type="checkbox"
+                                  disabled={busy || !row.posterUrl}
+                                  checked={row.confirmImage}
+                                  onChange={(e) =>
+                                    setTrailerReviewRows((prev) =>
+                                      prev.map((x) => (x.itemId === row.itemId ? { ...x, confirmImage: e.target.checked } : x))
+                                    )
+                                  }
+                                />
+                              </td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                                {row.imdbUrl ? (
+                                  <a href={row.imdbUrl} target="_blank" rel="noreferrer">
+                                    {row.imdbLabel || "IMDb"}
+                                  </a>
+                                ) : (
+                                  "-"
+                                )}
+                              </td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                                <input
+                                  type="checkbox"
+                                  disabled={busy || !row.imdbUrl}
+                                  checked={row.confirmImdb}
+                                  onChange={(e) =>
+                                    setTrailerReviewRows((prev) =>
+                                      prev.map((x) => (x.itemId === row.itemId ? { ...x, confirmImdb: e.target.checked } : x))
+                                    )
+                                  }
+                                />
+                              </td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                                {row.elcinemaUrl ? (
+                                  <a href={row.elcinemaUrl} target="_blank" rel="noreferrer">
+                                    {row.elcinemaLabel || "Elcinema"}
+                                  </a>
+                                ) : (
+                                  "-"
+                                )}
+                              </td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.lookupSource || "-"}</td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9", maxWidth: 380 }}>{row.lookupDiagnostics || "-"}</td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchedOn}</td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchScore}</td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9", maxWidth: 280 }}>{row.matchBreakdown}</td>
+                              <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                                {row.status}
+                                {row.note ? ` - ${row.note}` : ""}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div style={{ border: "1px solid #d1d5db", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+            <div
+              onClick={() => setHomeOpenSection((prev) => (prev === "images" ? null : "images"))}
+              style={{ cursor: "pointer", padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}
+            >
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 18 }}>Image Downloading</div>
+                <div style={{ opacity: 0.7, marginTop: 4 }}>Load a group, filter content, then download Master Artwork or Logo files.</div>
+              </div>
+              <span style={{ fontSize: 18, opacity: 0.7 }}>{homeOpenSection === "images" ? "▾" : "▸"}</span>
+            </div>
+            {homeOpenSection === "images" && (
+              <div style={{ padding: 12, borderTop: "1px solid #e5e7eb" }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+                  <label>
+                    Group{" "}
+                    <select
+                      disabled={imageBusy}
+                      value={imageGroupId}
+                      onChange={(e) => {
+                        setImageGroupId(e.target.value);
+                      }}
+                    >
+                      {groups.length === 0 ? (
+                        <option value="">No groups</option>
+                      ) : (
+                        groups.map((g) => (
+                          <option key={g.id} value={g.id}>
+                            {g.title}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  <label>
+                    Content{" "}
+                    <select
+                      disabled={imageBusy}
+                      value={imageFilterContent}
+                      onChange={(e) => setImageFilterContent(e.target.value as ImageContentFilter)}
+                    >
+                      <option value="all">All</option>
+                      <option value="movies">Movies</option>
+                      <option value="tv">TV</option>
+                      <option value="audio">Audio</option>
+                    </select>
+                  </label>
+                  <label>
+                    Type{" "}
+                    <select disabled={imageBusy} value={imageFilterType} onChange={(e) => setImageFilterType(e.target.value as ImageTypeFilter)}>
+                      <option value="master">Master Artwork</option>
+                      <option value="logo">Logo</option>
+                    </select>
+                  </label>
+                  <label>
+                    Search{" "}
+                    <input
+                      value={imageSearch}
+                      onChange={(e) => setImageSearch(e.target.value)}
+                      placeholder="Item name or ID..."
+                      disabled={imageBusy && imageRows.length === 0}
+                    />
+                  </label>
+                  <button disabled={imageBusy || !imageGroupId} onClick={() => void loadImageRowsForGroup(imageGroupId)}>
+                    Reload group
+                  </button>
+                </div>
+                <div style={{ fontSize: 13, opacity: 0.85 }}>
+                  <div>Status: {imageBusy ? "Working" : "Idle"}</div>
+                  <div>{imageStatus}</div>
+                  <div style={{ marginTop: 2 }}>
+                    Rows: {filteredImageRows.length}/{imageRowsWithMeta.length} | Download type: {imageTypeLabel}
+                  </div>
+                </div>
+                <div style={{ marginTop: 10, maxHeight: 420, overflow: "auto", border: "1px solid #ddd" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead>
                       <tr>
@@ -3495,120 +3965,54 @@ export default function App() {
                           Item
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Searched title
+                          Content
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Translation
+                          Master
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Year/Season
+                          Logo
                         </th>
                         <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          IMDb image
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Confirm image
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          IMDb link
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Confirm IMDb
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Elcinema
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Lookup source
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Lookup diagnostics
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Matched on
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Score
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Match breakdown
-                        </th>
-                        <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid #ddd", position: "sticky", top: 0, background: "#fff" }}>
-                          Status
+                          Download
                         </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredTrailerReviewRows.map((row) => (
-                        <tr key={`trailer-review-${row.itemId}`}>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            {row.itemName} ({row.itemId})
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.searchTitle}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.translatedTitle}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.yearText}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            {row.posterUrl ? (
-                              <img src={row.posterUrl} alt={row.itemName} style={{ width: 84, height: 126, objectFit: "cover", borderRadius: 2 }} />
-                            ) : (
-                              "-"
-                            )}
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <input
-                              type="checkbox"
-                              disabled={busy || !row.posterUrl}
-                              checked={row.confirmImage}
-                              onChange={(e) =>
-                                setTrailerReviewRows((prev) =>
-                                  prev.map((x) => (x.itemId === row.itemId ? { ...x, confirmImage: e.target.checked } : x))
-                                )
-                              }
-                            />
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            {row.imdbUrl ? (
-                              <a href={row.imdbUrl} target="_blank" rel="noreferrer">
-                                {row.imdbLabel || "IMDb"}
-                              </a>
-                            ) : (
-                              "-"
-                            )}
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            <input
-                              type="checkbox"
-                              disabled={busy || !row.imdbUrl}
-                              checked={row.confirmImdb}
-                              onChange={(e) =>
-                                setTrailerReviewRows((prev) =>
-                                  prev.map((x) => (x.itemId === row.itemId ? { ...x, confirmImdb: e.target.checked } : x))
-                                )
-                              }
-                            />
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            {row.elcinemaUrl ? (
-                              <a href={row.elcinemaUrl} target="_blank" rel="noreferrer">
-                                {row.elcinemaLabel || "Elcinema"}
-                              </a>
-                            ) : (
-                              "-"
-                            )}
-                          </td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.lookupSource || "-"}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9", maxWidth: 380 }}>{row.lookupDiagnostics || "-"}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchedOn}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.matchScore}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9", maxWidth: 280 }}>{row.matchBreakdown}</td>
-                          <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
-                            {row.status}
-                            {row.note ? ` - ${row.note}` : ""}
+                      {filteredImageRows.length === 0 && (
+                        <tr>
+                          <td colSpan={5} style={{ padding: 8, opacity: 0.7 }}>
+                            No rows match current filters.
                           </td>
                         </tr>
-                      ))}
+                      )}
+                      {filteredImageRows.map((row) => {
+                        const canDownload = imageFilterType === "master" ? row.hasMaster : row.hasLogo;
+                        const rowKey = `${row.item.id}:${imageFilterType}`;
+                        return (
+                          <tr key={`image-row-${row.item.id}`}>
+                            <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                              {String(row.item.name || "(no name)")} ({row.item.id})
+                            </td>
+                            <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.contentType || "-"}</td>
+                            <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.hasMaster ? "Yes" : "No"}</td>
+                            <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.hasLogo ? "Yes" : "No"}</td>
+                            <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
+                              <button
+                                disabled={imageBusy || !canDownload || imageDownloadKey === rowKey}
+                                onClick={() => void downloadImageForItem(row.item, imageFilterType)}
+                              >
+                                {imageDownloadKey === rowKey ? "Preparing..." : `Download ${imageTypeLabel}`}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
+                </div>
+                <div style={{ marginTop: 6, opacity: 0.65, fontSize: 12 }}>
+                  File columns used: `{COL_MASTER_ARTWORK_FILE}` (Master Artwork), `{COL_LOGO_FILE}` (Logo)
                 </div>
               </div>
             )}
