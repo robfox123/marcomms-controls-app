@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "2.0.4";
+const APP_VERSION = "2.0.5";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -131,6 +131,12 @@ type MondayAsset = {
   name?: string | null;
   public_url?: string | null;
   url?: string | null;
+};
+type MondayColumnWithFiles = {
+  id: string;
+  text?: string | null;
+  value?: unknown;
+  files?: MondayAsset[];
 };
 type TrailerReviewRow = {
   itemId: string;
@@ -1530,6 +1536,45 @@ export default function App() {
     return { url: "", name: "" };
   }
 
+  async function fetchItemFileFromColumn(itemId: string, columnId: string): Promise<{ url: string; name: string }> {
+    const query = `
+      query ($itemIds: [ID!], $columnId: [String!]) {
+        items(ids: $itemIds) {
+          id
+          column_values(ids: $columnId) {
+            id
+            text
+            value
+            ... on FileValue {
+              files {
+                id
+                name
+                public_url
+                url
+              }
+            }
+          }
+        }
+      }
+    `;
+    const res = await mondayApiWithRetry(query, { variables: { itemIds: [itemId], columnId: [columnId] } });
+    const col = (res?.data?.items?.[0]?.column_values?.[0] ?? null) as MondayColumnWithFiles | null;
+    const files = Array.isArray(col?.files) ? col.files : [];
+    for (const file of files) {
+      const url = String(file?.public_url ?? file?.url ?? "").trim();
+      if (url) return { url, name: String(file?.name ?? "").trim() };
+    }
+
+    const fallbackMeta = extractFileMetadata(col?.value);
+    if (fallbackMeta.urls[0]) {
+      return { url: fallbackMeta.urls[0], name: fallbackMeta.names[0] ?? "" };
+    }
+    if (fallbackMeta.assetIds.length) {
+      return await fetchAssetDownload(fallbackMeta.assetIds);
+    }
+    return { url: "", name: "" };
+  }
+
   function triggerDownload(url: string, fallbackName: string) {
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -1546,7 +1591,11 @@ export default function App() {
     const col = getItemColumn(item, columnId);
     const meta = extractFileMetadata(col?.value);
     const directUrl = meta.urls[0] ?? "";
-    const fromAsset = directUrl ? { url: directUrl, name: meta.names[0] ?? "" } : await fetchAssetDownload(meta.assetIds);
+    const fromAsset = directUrl
+      ? { url: directUrl, name: meta.names[0] ?? "" }
+      : meta.assetIds.length
+        ? await fetchAssetDownload(meta.assetIds)
+        : await fetchItemFileFromColumn(String(item.id), columnId);
     const url = String(fromAsset.url || "").trim();
     const fileName = String(fromAsset.name || meta.names[0] || `${String(item.name || item.id)}-${type}.jpg`).trim();
     return { url, fileName };
