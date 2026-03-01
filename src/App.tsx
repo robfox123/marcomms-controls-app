@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "2.0.3";
+const APP_VERSION = "2.0.4";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -1270,6 +1270,7 @@ export default function App() {
   const [imageFilterType, setImageFilterType] = useState<ImageTypeFilter>("master");
   const [imageSearch, setImageSearch] = useState("");
   const [imageBusy, setImageBusy] = useState(false);
+  const [imageBulkBusy, setImageBulkBusy] = useState(false);
   const [imageStatus, setImageStatus] = useState("Select a group to load images.");
   const [imageDownloadKey, setImageDownloadKey] = useState("");
   const [homeOpenSection, setHomeOpenSection] = useState<HomeSection>("align");
@@ -1540,6 +1541,17 @@ export default function App() {
     anchor.remove();
   }
 
+  async function resolveImageDownload(item: MondayBoardItem, type: ImageTypeFilter): Promise<{ url: string; fileName: string }> {
+    const columnId = type === "master" ? COL_MASTER_ARTWORK_FILE : COL_LOGO_FILE;
+    const col = getItemColumn(item, columnId);
+    const meta = extractFileMetadata(col?.value);
+    const directUrl = meta.urls[0] ?? "";
+    const fromAsset = directUrl ? { url: directUrl, name: meta.names[0] ?? "" } : await fetchAssetDownload(meta.assetIds);
+    const url = String(fromAsset.url || "").trim();
+    const fileName = String(fromAsset.name || meta.names[0] || `${String(item.name || item.id)}-${type}.jpg`).trim();
+    return { url, fileName };
+  }
+
   async function loadImageRowsForGroup(nextGroupId: string) {
     if (!boardId) {
       setImageStatus("Board context not ready yet.");
@@ -1575,16 +1587,10 @@ export default function App() {
   }
 
   async function downloadImageForItem(item: MondayBoardItem, type: ImageTypeFilter) {
-    const columnId = type === "master" ? COL_MASTER_ARTWORK_FILE : COL_LOGO_FILE;
     const rowKey = `${item.id}:${type}`;
     setImageDownloadKey(rowKey);
     try {
-      const col = getItemColumn(item, columnId);
-      const meta = extractFileMetadata(col?.value);
-      const directUrl = meta.urls[0] ?? "";
-      const fromAsset = directUrl ? { url: directUrl, name: meta.names[0] ?? "" } : await fetchAssetDownload(meta.assetIds);
-      const url = String(fromAsset.url || "").trim();
-      const fileName = String(fromAsset.name || meta.names[0] || `${String(item.name || item.id)}-${type}.jpg`).trim();
+      const { url, fileName } = await resolveImageDownload(item, type);
 
       if (!url) {
         setImageStatus(`No downloadable ${type === "master" ? "Master Artwork" : "Logo"} found for item ${item.id}.`);
@@ -1598,6 +1604,39 @@ export default function App() {
     } finally {
       setImageDownloadKey("");
     }
+  }
+
+  async function downloadAllFilteredImages() {
+    const toDownload = filteredImageRows.filter((row) => (imageFilterType === "master" ? row.hasMaster : row.hasLogo));
+    if (!toDownload.length) {
+      setImageStatus(`No ${imageTypeLabel} files available in current filtered results.`);
+      return;
+    }
+
+    setImageBulkBusy(true);
+    let started = 0;
+    let skipped = 0;
+    for (let i = 0; i < toDownload.length; i += 1) {
+      const row = toDownload[i];
+      try {
+        const { url, fileName } = await resolveImageDownload(row.item, imageFilterType);
+        if (!url) {
+          skipped += 1;
+        } else {
+          triggerDownload(url, fileName);
+          started += 1;
+        }
+      } catch {
+        skipped += 1;
+      } finally {
+        setImageStatus(
+          `Bulk download ${i + 1}/${toDownload.length} • Started: ${started} • Skipped: ${skipped} (${imageTypeLabel})`
+        );
+        await sleep(120);
+      }
+    }
+    setImageBulkBusy(false);
+    setImageStatus(`Bulk download complete. Started: ${started}, Skipped: ${skipped} (${imageTypeLabel}).`);
   }
 
   useEffect(() => {
@@ -3949,6 +3988,12 @@ export default function App() {
                   <button disabled={imageBusy || !imageGroupId} onClick={() => void loadImageRowsForGroup(imageGroupId)}>
                     Reload group
                   </button>
+                  <button
+                    disabled={imageBusy || imageBulkBusy || filteredImageRows.length === 0}
+                    onClick={() => void downloadAllFilteredImages()}
+                  >
+                    {imageBulkBusy ? `Downloading all ${imageTypeLabel}...` : `Download all ${imageTypeLabel}`}
+                  </button>
                 </div>
                 <div style={{ fontSize: 13, opacity: 0.85 }}>
                   <div>Status: {imageBusy ? "Working" : "Idle"}</div>
@@ -3999,7 +4044,7 @@ export default function App() {
                             <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>{row.hasLogo ? "Yes" : "No"}</td>
                             <td style={{ padding: 6, borderBottom: "1px solid #f1f5f9" }}>
                               <button
-                                disabled={imageBusy || !canDownload || imageDownloadKey === rowKey}
+                                disabled={imageBusy || imageBulkBusy || !canDownload || imageDownloadKey === rowKey}
                                 onClick={() => void downloadImageForItem(row.item, imageFilterType)}
                               >
                                 {imageDownloadKey === rowKey ? "Preparing..." : `Download ${imageTypeLabel}`}
