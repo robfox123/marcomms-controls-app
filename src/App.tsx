@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "2.0.5";
+const APP_VERSION = "2.0.6";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -130,7 +130,6 @@ type MondayAsset = {
   id: string;
   name?: string | null;
   public_url?: string | null;
-  url?: string | null;
 };
 type MondayColumnWithFiles = {
   id: string;
@@ -1274,11 +1273,13 @@ export default function App() {
   const [imageRows, setImageRows] = useState<MondayBoardItem[]>([]);
   const [imageFilterContent, setImageFilterContent] = useState<ImageContentFilter>("all");
   const [imageFilterType, setImageFilterType] = useState<ImageTypeFilter>("master");
+  const [imageHideUnavailable, setImageHideUnavailable] = useState(true);
   const [imageSearch, setImageSearch] = useState("");
   const [imageBusy, setImageBusy] = useState(false);
   const [imageBulkBusy, setImageBulkBusy] = useState(false);
   const [imageStatus, setImageStatus] = useState("Select a group to load images.");
   const [imageDownloadKey, setImageDownloadKey] = useState("");
+  const [imageAvailabilityMap, setImageAvailabilityMap] = useState<Record<string, { master: boolean; logo: boolean }>>({});
   const [homeOpenSection, setHomeOpenSection] = useState<HomeSection>("align");
   const [workflow, setWorkflow] = useState<Workflow>("home");
   const [alignStep, setAlignStep] = useState<1 | 2>(1);
@@ -1523,14 +1524,13 @@ export default function App() {
           id
           name
           public_url
-          url
         }
       }
     `;
     const res = await mondayApiWithRetry(query, { variables: { ids: assetIds } });
     const assets = (res?.data?.assets ?? []) as MondayAsset[];
     for (const asset of assets) {
-      const url = String(asset?.public_url ?? asset?.url ?? "").trim();
+      const url = String(asset?.public_url ?? "").trim();
       if (url) return { url, name: String(asset?.name ?? "").trim() };
     }
     return { url: "", name: "" };
@@ -1550,7 +1550,6 @@ export default function App() {
                 id
                 name
                 public_url
-                url
               }
             }
           }
@@ -1561,8 +1560,12 @@ export default function App() {
     const col = (res?.data?.items?.[0]?.column_values?.[0] ?? null) as MondayColumnWithFiles | null;
     const files = Array.isArray(col?.files) ? col.files : [];
     for (const file of files) {
-      const url = String(file?.public_url ?? file?.url ?? "").trim();
+      const url = String(file?.public_url ?? "").trim();
       if (url) return { url, name: String(file?.name ?? "").trim() };
+    }
+    if (files.length) {
+      const fromFilesAsAssets = await fetchAssetDownload(files.map((f) => String(f.id)));
+      if (fromFilesAsAssets.url) return fromFilesAsAssets;
     }
 
     const fallbackMeta = extractFileMetadata(col?.value);
@@ -1573,6 +1576,60 @@ export default function App() {
       return await fetchAssetDownload(fallbackMeta.assetIds);
     }
     return { url: "", name: "" };
+  }
+
+  async function fetchImageAvailabilityForItems(items: MondayBoardItem[]) {
+    const ids = items.map((x) => String(x.id)).filter(Boolean);
+    if (!ids.length) {
+      setImageAvailabilityMap({});
+      return;
+    }
+    const query = `
+      query ($itemIds: [ID!], $columnIds: [String!]) {
+        items(ids: $itemIds) {
+          id
+          column_values(ids: $columnIds) {
+            id
+            text
+            value
+            ... on FileValue {
+              files {
+                id
+                public_url
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const out: Record<string, { master: boolean; logo: boolean }> = {};
+    const BATCH = 60;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const batch = ids.slice(i, i + BATCH);
+      const res = await mondayApiWithRetry(query, {
+        variables: { itemIds: batch, columnIds: [COL_MASTER_ARTWORK_FILE, COL_LOGO_FILE] },
+      });
+      const rows = (res?.data?.items ?? []) as Array<{ id?: string | number; column_values?: MondayColumnWithFiles[] }>;
+      for (const row of rows) {
+        const itemId = String(row?.id ?? "");
+        if (!itemId) continue;
+        const values = row?.column_values ?? [];
+        const masterCol = values.find((v) => v.id === COL_MASTER_ARTWORK_FILE);
+        const logoCol = values.find((v) => v.id === COL_LOGO_FILE);
+        const masterMeta = extractFileMetadata(masterCol?.value);
+        const logoMeta = extractFileMetadata(logoCol?.value);
+        const masterFiles = Array.isArray(masterCol?.files) ? masterCol.files : [];
+        const logoFiles = Array.isArray(logoCol?.files) ? logoCol.files : [];
+        out[itemId] = {
+          master: Boolean(masterFiles.length || masterMeta.urls.length || masterMeta.assetIds.length || String(masterCol?.text ?? "").trim()),
+          logo: Boolean(logoFiles.length || logoMeta.urls.length || logoMeta.assetIds.length || String(logoCol?.text ?? "").trim()),
+        };
+      }
+      setImageStatus(`Loading image availability... ${Math.min(i + batch.length, ids.length)}/${ids.length}`);
+      await sleep(40);
+    }
+    setImageAvailabilityMap(out);
   }
 
   function triggerDownload(url: string, fallbackName: string) {
@@ -1626,9 +1683,11 @@ export default function App() {
         setImageStatus(`Loading item details... ${done}/${total}`);
       });
       setImageRows(items);
+      await fetchImageAvailabilityForItems(items);
       setImageStatus(`Loaded ${items.length} rows from selected group.`);
     } catch (error: any) {
       setImageRows([]);
+      setImageAvailabilityMap({});
       setImageStatus(`Image loading failed: ${formatApiError(error)}`);
     } finally {
       setImageBusy(false);
@@ -1697,12 +1756,17 @@ export default function App() {
     return imageRows.map((item) => {
       const contentType = getItemColumnText(item, COL_CONTENT_TYPE);
       const contentBucket = getContentBucket(contentType);
+      const avail = imageAvailabilityMap[String(item.id)];
       const masterCol = getItemColumn(item, COL_MASTER_ARTWORK_FILE);
       const logoCol = getItemColumn(item, COL_LOGO_FILE);
       const masterMeta = extractFileMetadata(masterCol?.value);
       const logoMeta = extractFileMetadata(logoCol?.value);
-      const hasMaster = Boolean(masterMeta.urls.length || masterMeta.assetIds.length || String(masterCol?.text ?? "").trim());
-      const hasLogo = Boolean(logoMeta.urls.length || logoMeta.assetIds.length || String(logoCol?.text ?? "").trim());
+      const hasMaster =
+        avail?.master ??
+        Boolean(masterMeta.urls.length || masterMeta.assetIds.length || String(masterCol?.text ?? "").trim());
+      const hasLogo =
+        avail?.logo ??
+        Boolean(logoMeta.urls.length || logoMeta.assetIds.length || String(logoCol?.text ?? "").trim());
       return {
         item,
         contentType,
@@ -1711,17 +1775,19 @@ export default function App() {
         hasLogo,
       };
     });
-  }, [imageRows]);
+  }, [imageRows, imageAvailabilityMap]);
 
   const filteredImageRows = useMemo(() => {
     const q = imageSearch.trim().toLowerCase();
     return imageRowsWithMeta.filter((row) => {
       if (imageFilterContent !== "all" && row.contentBucket !== imageFilterContent) return false;
+      const hasSelectedType = imageFilterType === "master" ? row.hasMaster : row.hasLogo;
+      if (imageHideUnavailable && !hasSelectedType) return false;
       if (!q) return true;
       const hay = [row.item.id, row.item.name, row.contentType].join(" ").toLowerCase();
       return hay.includes(q);
     });
-  }, [imageRowsWithMeta, imageFilterContent, imageSearch]);
+  }, [imageRowsWithMeta, imageFilterContent, imageFilterType, imageHideUnavailable, imageSearch]);
   const selectedTitleLabels = useMemo(() => getTitleFieldLabels(pgOverrideSheet), [pgOverrideSheet]);
 
   const selectedSheetOverride = pgOverrides[pgOverrideSheet];
@@ -4033,6 +4099,14 @@ export default function App() {
                       placeholder="Item name or ID..."
                       disabled={imageBusy && imageRows.length === 0}
                     />
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={imageHideUnavailable}
+                      onChange={(e) => setImageHideUnavailable(e.target.checked)}
+                    />
+                    Hide unavailable
                   </label>
                   <button disabled={imageBusy || !imageGroupId} onClick={() => void loadImageRowsForGroup(imageGroupId)}>
                     Reload group
