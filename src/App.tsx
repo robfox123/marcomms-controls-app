@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "2.0.7";
+const APP_VERSION = "2.0.8";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -1550,6 +1550,10 @@ export default function App() {
     `;
     const res = await mondayApiWithRetry(query, { variables: { itemIds: [itemId], columnId: [columnId] } });
     const col = (res?.data?.items?.[0]?.column_values?.[0] ?? null) as MondayColumnWithFiles | null;
+    const textUrl = String(col?.text ?? "").trim();
+    if (/^https?:\/\//i.test(textUrl)) {
+      return { url: textUrl, name: "" };
+    }
     const fallbackMeta = extractFileMetadata(col?.value);
     if (fallbackMeta.urls[0]) {
       return { url: fallbackMeta.urls[0], name: fallbackMeta.names[0] ?? "" };
@@ -1620,8 +1624,9 @@ export default function App() {
   async function resolveImageDownload(item: MondayBoardItem, type: ImageTypeFilter): Promise<{ url: string; fileName: string }> {
     const columnId = type === "master" ? COL_MASTER_ARTWORK_FILE : COL_LOGO_FILE;
     const col = getItemColumn(item, columnId);
+    const textUrl = String(col?.text ?? "").trim();
     const meta = extractFileMetadata(col?.value);
-    const directUrl = meta.urls[0] ?? "";
+    const directUrl = /^https?:\/\//i.test(textUrl) ? textUrl : meta.urls[0] ?? "";
     const fromAsset = directUrl
       ? { url: directUrl, name: meta.names[0] ?? "" }
       : meta.assetIds.length
