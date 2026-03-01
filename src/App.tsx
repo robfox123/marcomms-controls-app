@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "2.0.8";
+const APP_VERSION = "2.0.9";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -1701,27 +1701,29 @@ export default function App() {
     }
 
     setImageBulkBusy(true);
-    let started = 0;
+    const direct: Array<{ url: string; fileName: string }> = [];
     let skipped = 0;
-    for (let i = 0; i < toDownload.length; i += 1) {
-      const row = toDownload[i];
-      try {
-        const { url, fileName } = await resolveImageDownload(row.item, imageFilterType);
-        if (!url) {
-          skipped += 1;
-        } else {
-          triggerDownload(url, fileName);
-          started += 1;
-        }
-      } catch {
+    const columnId = imageFilterType === "master" ? COL_MASTER_ARTWORK_FILE : COL_LOGO_FILE;
+
+    for (const row of toDownload) {
+      const col = getItemColumn(row.item, columnId);
+      const textUrl = String(col?.text ?? "").trim();
+      const meta = extractFileMetadata(col?.value);
+      const directUrl = /^https?:\/\//i.test(textUrl) ? textUrl : meta.urls[0] ?? "";
+      if (!directUrl) {
         skipped += 1;
-      } finally {
-        setImageStatus(
-          `Bulk download ${i + 1}/${toDownload.length} • Started: ${started} • Skipped: ${skipped} (${imageTypeLabel})`
-        );
-        await sleep(120);
+        continue;
       }
+      const fileName = String(meta.names[0] || `${String(row.item.name || row.item.id)}-${imageFilterType}.jpg`).trim();
+      direct.push({ url: directUrl, fileName });
     }
+
+    // Fire all direct downloads in one user-gesture cycle.
+    for (const hit of direct) {
+      triggerDownload(hit.url, hit.fileName);
+    }
+
+    const started = direct.length;
     setImageBulkBusy(false);
     setImageStatus(`Bulk download complete. Started: ${started}, Skipped: ${skipped} (${imageTypeLabel}).`);
   }
