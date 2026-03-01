@@ -6,7 +6,7 @@ const monday = mondaySdk();
 const COLUMN_ID = "color_mksw618w";
 const MARCOMMS_BOARD_ID = "8440693148";
 const STEP_DELAY_MS = 120;
-const APP_VERSION = "2.0.6";
+const APP_VERSION = "2.0.7";
 const UPDATE_CONCURRENCY = 3;
 const UPDATE_DELAY_MS = 40;
 const UPDATE_RETRY_LIMIT = 2;
@@ -135,7 +135,6 @@ type MondayColumnWithFiles = {
   id: string;
   text?: string | null;
   value?: unknown;
-  files?: MondayAsset[];
 };
 type TrailerReviewRow = {
   itemId: string;
@@ -1545,29 +1544,12 @@ export default function App() {
             id
             text
             value
-            ... on FileValue {
-              files {
-                id
-                name
-                public_url
-              }
-            }
           }
         }
       }
     `;
     const res = await mondayApiWithRetry(query, { variables: { itemIds: [itemId], columnId: [columnId] } });
     const col = (res?.data?.items?.[0]?.column_values?.[0] ?? null) as MondayColumnWithFiles | null;
-    const files = Array.isArray(col?.files) ? col.files : [];
-    for (const file of files) {
-      const url = String(file?.public_url ?? "").trim();
-      if (url) return { url, name: String(file?.name ?? "").trim() };
-    }
-    if (files.length) {
-      const fromFilesAsAssets = await fetchAssetDownload(files.map((f) => String(f.id)));
-      if (fromFilesAsAssets.url) return fromFilesAsAssets;
-    }
-
     const fallbackMeta = extractFileMetadata(col?.value);
     if (fallbackMeta.urls[0]) {
       return { url: fallbackMeta.urls[0], name: fallbackMeta.names[0] ?? "" };
@@ -1592,12 +1574,6 @@ export default function App() {
             id
             text
             value
-            ... on FileValue {
-              files {
-                id
-                public_url
-              }
-            }
           }
         }
       }
@@ -1619,11 +1595,9 @@ export default function App() {
         const logoCol = values.find((v) => v.id === COL_LOGO_FILE);
         const masterMeta = extractFileMetadata(masterCol?.value);
         const logoMeta = extractFileMetadata(logoCol?.value);
-        const masterFiles = Array.isArray(masterCol?.files) ? masterCol.files : [];
-        const logoFiles = Array.isArray(logoCol?.files) ? logoCol.files : [];
         out[itemId] = {
-          master: Boolean(masterFiles.length || masterMeta.urls.length || masterMeta.assetIds.length || String(masterCol?.text ?? "").trim()),
-          logo: Boolean(logoFiles.length || logoMeta.urls.length || logoMeta.assetIds.length || String(logoCol?.text ?? "").trim()),
+          master: Boolean(masterMeta.urls.length || masterMeta.assetIds.length || String(masterCol?.text ?? "").trim()),
+          logo: Boolean(logoMeta.urls.length || logoMeta.assetIds.length || String(logoCol?.text ?? "").trim()),
         };
       }
       setImageStatus(`Loading image availability... ${Math.min(i + batch.length, ids.length)}/${ids.length}`);
